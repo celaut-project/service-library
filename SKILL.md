@@ -126,8 +126,9 @@ lock.release().await;                        // or drop it; the pool shrinks to 
 
 `lock_for(len, limit)` gives up after a time and `try_lock(len)` does not wait. The node
 charges a fee per request: the manager asks for `locked + waiting` when memory is short, asks
-for `locked` when the last waiter is served and memory is unlocked, and never asks twice in a
-row for the same amount. `stats()` gives the pool, what is locked and waiting, and the balance
+for `locked` when the last waiter is served and memory is unlocked, never asks for less than
+the limit that the node gave at the start (nor for 0: nodo hibernates an instance with no memory),
+and never asks twice in a row for the same amount. `stats()` gives the pool, what is locked and waiting, and the balance
 in MU that the node reported on the last request. Only a local instance may use this call.
 
 ## Not done yet

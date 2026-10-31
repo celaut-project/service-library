@@ -5,7 +5,9 @@
 //! ([`ResourceManager::lock`]). If the pool has no room, the manager asks the node for the
 //! memory that is locked plus all that waits (`ModifyServiceSystemResources`) and the job
 //! goes on when the node has given it; when the last waiter is served and memory is
-//! unlocked, the manager asks for what is still locked, so the service does not pay for
+//! unlocked, the manager asks for what is still locked, but never for less than the limit that the
+//! node gave at the start (the service uses memory that no lock counts, and a limit of 0 hibernates
+//! the instance in nodo), so the service does not pay for
 //! memory that it does not use. The node charges a fee per request: the manager does not
 //! ask twice in a row for the same amount.
 //!
@@ -75,6 +77,10 @@ pub struct Stats {
 }
 
 struct State {
+    /// The memory limit that the node gave the service at the start: the manager never asks
+    /// for less. The service itself uses memory that no lock counts, and a limit of 0 is,
+    /// for nodo, a request to hibernate the instance.
+    base: u64,
     pool: u64,
     locked: u64,
     last_request: Option<u64>,
@@ -102,9 +108,11 @@ impl<R: Resizer> ResourceManager<R> {
         Arc::new(ResourceManager {
             resizer,
             state: AsyncMutex::new(State {
+                base: pool,
                 pool,
                 locked: 0,
-                last_request: None,
+                // The limit in force is the one that the node gave at the start.
+                last_request: Some(pool),
                 balance_mu: 0,
             }),
             waiting: Mutex::new(Vec::new()),
@@ -187,9 +195,11 @@ impl<R: Resizer> ResourceManager<R> {
         }
     }
 
-    /// Ask the node for `request` bytes, unless it is what is already in force.
+    /// Ask the node for `request` bytes, unless it is what is already in force. Never less
+    /// than the limit of the start, and never 0.
     async fn update(&self, state: &mut State, request: u64) -> Result<(), Error> {
-        if state.last_request == Some(request) {
+        let request = request.max(state.base);
+        if request == 0 || state.last_request == Some(request) {
             return Ok(());
         }
         let resized = self.resizer.resize(request).await?;
@@ -348,8 +358,28 @@ mod tests {
         assert_eq!(m.stats().await.available, 40);
         assert!(node.requests().is_empty());
         lock.release().await;
-        // 0 locked and nobody waits: the pool shrinks to 0.
-        assert_eq!(node.requests(), vec![0]);
+        // 0 locked and nobody waits: the pool is back at the limit of the start, which is
+        // what the node has already. It is not asked, and it is never asked for 0.
+        assert!(node.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_pool_never_shrinks_below_the_limit_of_the_start() {
+        let node = FakeResizer::new(1000);
+        let m = ResourceManager::new(node.clone(), 100);
+        m.lock(10).await.unwrap().release().await;
+        m.lock(150).await.unwrap().release().await;
+        // 150 grows the pool, and the release goes back to 100, not to 0.
+        assert_eq!(node.requests(), vec![150, 100]);
+        assert_eq!(m.stats().await.pool, 100);
+    }
+
+    #[tokio::test]
+    async fn a_service_that_started_with_no_limit_is_never_asked_for_zero() {
+        let node = FakeResizer::new(1000);
+        let m = ResourceManager::new(node.clone(), 0);
+        m.lock(50).await.unwrap().release().await;
+        assert_eq!(node.requests(), vec![50]);
     }
 
     #[tokio::test]
@@ -364,10 +394,12 @@ mod tests {
         assert_eq!((stats.pool, stats.locked, stats.waiting), (200, 200, 0));
         assert_eq!(stats.balance_mu, 999);
         b.release().await;
-        assert_eq!(node.requests(), vec![200, 80]);
+        // 80 is under the limit of the start: back to 100.
+        assert_eq!(node.requests(), vec![200, 100]);
         a.release().await;
-        assert_eq!(node.requests(), vec![200, 80, 0]);
-        assert_eq!(m.stats().await.balance_mu, 997);
+        // Nothing is locked, and 100 is already in force.
+        assert_eq!(node.requests(), vec![200, 100]);
+        assert_eq!(m.stats().await.balance_mu, 998);
     }
 
     #[tokio::test]
@@ -376,10 +408,13 @@ mod tests {
         let m = ResourceManager::new(node.clone(), 100);
         let _held = m.lock(50).await.unwrap();
         let mut other = m.lock(10).await.unwrap();
-        // Both unlocks leave 60 bytes locked: the node is asked once.
+        // Both unlocks leave 60 bytes locked, which is under the 100 in force: no request.
         other.unlock(0).await;
         other.unlock(0).await;
-        assert_eq!(node.requests(), vec![60]);
+        assert!(node.requests().is_empty());
+        let _more = m.lock(70).await.unwrap();
+        // 50 + 10 + 70 = 130 does not fit: one request, and the same amount is not asked twice.
+        assert_eq!(node.requests(), vec![130]);
     }
 
     #[tokio::test]
