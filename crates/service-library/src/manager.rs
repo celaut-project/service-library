@@ -75,7 +75,8 @@ impl Default for ServiceOptions {
 pub struct MaintenanceReport {
     /// The instances that it stopped.
     pub stopped: usize,
-    /// The tokens of instances that it could not stop. They can still run and bill.
+    /// The tokens of instances that it could not stop. They can still run and bill. They are
+    /// credentials, so keep them out of logs: use [`crate::instance::token_tag`] to name one.
     pub leaked: Vec<String>,
 }
 
