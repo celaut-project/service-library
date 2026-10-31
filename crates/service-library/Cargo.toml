@@ -1,0 +1,17 @@
+[package]
+name = "service-library"
+description = "The library of a Celaut service: talk to the node of the service, and keep the instances of its dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bee-rpc = { workspace = true }
+celaut-proto = { workspace = true }
+prost = "0.14"
+thiserror = "2"
+tokio = { version = "1.53", features = ["rt", "time", "sync", "macros"] }
+tonic = { version = "0.14", default-features = false, features = ["transport"] }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["rt", "time", "sync", "macros", "test-util"] }

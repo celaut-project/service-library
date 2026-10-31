@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package buffer;
+
+message Empty {}
+
+message Buffer  {
+    message Head {
+        message Partition {
+            map<int32, Partition> index = 1;
+        }
+        int32 index = 1;
+        repeated Partition partitions = 2;
+    }
+    message Block {
+        message Hash {
+            bytes type = 1;
+            bytes value = 2;
+        }
+        repeated Hash hashes = 1;
+        repeated uint64 previous_lengths_position = 2;
+    }
+    optional bytes chunk = 1;
+    optional bool separator = 2;
+    optional bool signal = 3;
+    optional Head head = 4;
+    optional Block block = 5;
+
+    // Reverse-direction control: "I already hold this block, stop sending it."
+    // Emitted by the *receiver* of a block, read by the *sender*, and therefore
+    // it travels on the opposite direction to `block`. It is a distinct field
+    // precisely so that it can never be confused with `block`, whose meaning on
+    // an inbound stream is already taken (block start / block end marker).
+    //
+    // A peer built before this field existed parses it as an unknown field and
+    // ignores it; senders pad the carrier Buffer with an empty `chunk` so that
+    // such a peer sees an inert zero-byte chunk rather than a Buffer with no
+    // known field set. See StreamControl in utils.py.
+    optional Block skip = 6;
+}

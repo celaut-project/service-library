@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/celaut-proto", "crates/service-library"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# bee-rpc is GPL-3.0-only, and so is this library.
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+celaut-proto = { path = "crates/celaut-proto" }
+# A git dependency on a tag until bee-rpc has a release (the same pin as chatui).
+bee-rpc = { git = "https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-rs", tag = "v0.3.0", features = ["grpc"] }
