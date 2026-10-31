@@ -12,9 +12,9 @@ use std::time::Duration;
 use bee_rpc::frame::{ParseOptions, Part};
 use celaut_proto::celaut::metadata::hash_tag::Hash;
 use celaut_proto::celaut::{
-    Amount, Client, Configuration, EstimatedCost, Metrics, ModifyDepositInput, ModifyDepositOutput,
-    ModifyServiceSystemResourcesInput, ModifyServiceSystemResourcesOutput, Refund, ServiceInstance,
-    Sysresources, TokenMessage,
+    Amount, ChatAck, ChatMessage, Client, Configuration, EstimatedCost, Metrics,
+    ModifyDepositInput, ModifyDepositOutput, ModifyServiceSystemResourcesInput,
+    ModifyServiceSystemResourcesOutput, Refund, ServiceInstance, Sysresources, TokenMessage,
 };
 use prost::Message;
 use tonic::transport::{Channel, Endpoint};
@@ -99,7 +99,7 @@ impl Gateway {
         bee_rpc::grpc::call(self.channel.clone(), &path, parts, options).await
     }
 
-    fn failed(operation: &str, attempts: u32, error: bee_rpc::Error) -> Error {
+    pub(crate) fn failed(operation: &str, attempts: u32, error: bee_rpc::Error) -> Error {
         Error::Gateway {
             operation: operation.to_string(),
             attempts,
@@ -165,6 +165,46 @@ impl Gateway {
             Some(part) => decode(part, "ModifyDepositOutput"),
             // A false bool and an empty text have no bytes.
             None => Ok(ModifyDepositOutput::default()),
+        }
+    }
+
+    /// A gateway on a channel that the caller made: for a test, or for a connection with its
+    /// own settings.
+    pub fn from_channel(channel: Channel) -> Self {
+        Gateway {
+            channel,
+            peer_id: None,
+        }
+    }
+
+    /// `Chat`: send a text message to the operator of the node. `client_id` is the id of
+    /// this service as a client of the node that gets the message, which must have it bound
+    /// to a peer. The answer says if the node stored the message and, if not, why.
+    pub async fn chat(
+        &self,
+        client_id: &str,
+        body: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<ChatAck, Error> {
+        let message = ChatMessage {
+            client_id: client_id.to_string(),
+            body: body.to_string(),
+            conversation_id: conversation_id.map(str::to_string),
+            service: None,
+        };
+        let answer = self
+            .call(
+                "Chat",
+                vec![Part::new(1, message.encode_to_vec())],
+                &[1],
+                CALL_TIMEOUT,
+            )
+            .await
+            .map_err(|e| Self::failed("sending a chat message", 1, e))?;
+        match answer.iter().find(|p| p.index == 1) {
+            Some(part) => decode(part, "ChatAck"),
+            // A false bool and an empty text have no bytes.
+            None => Ok(ChatAck::default()),
         }
     }
 

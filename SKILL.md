@@ -65,6 +65,13 @@ checkpoints of the node against the bytes that you sent and got (`tunnel::Receip
 the gateway the identity of the node with `Gateway::with_peer_id` so they must name it. The
 node charges the traffic to the instance.
 
+**Watching and talking.** `Gateway::observe` streams the live events of an instance that you
+started (the session, metrics such as CPU, memory and balance, notices, and with options the
+packets and the receipt checkpoints); the stream ends when the instance stops, and an
+observation that cannot start is one notice that says why. `Gateway::chat` sends a text
+message to the operator of a node, with the `client_id` of this service on that node (the node
+must have it bound to a peer).
+
 **Not your concern.** Choosing between nodes, and balancing the load, belong to the node of the
 service and to clients. A service talks to one gateway.
 
@@ -93,4 +100,3 @@ registries, so give it the network that its `service.json` asks for.
 
 - Tests against a real node: everything here is tested against a fake node and the vectors
   of nodo only.
-- `Chat` and `Observe`.

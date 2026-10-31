@@ -13,6 +13,7 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::config` | Reads the `ConfigurationFile` of `/__config__`: the gateway address and the memory limit. |
 | `service-library::gateway` | The calls of a service: `StartService` (by hash), `StopService` (with retries), `ModifyDeposit`, `GetMetrics`, `GetServiceEstimatedCost`. A service sends no `Client`. |
 | `service-library::gateway` (more) | `ModifyServiceSystemResources` (`modify_resources`) and `ServiceTunnel` (`tunnel`: one request and one answer). |
+| `service-library::observe`, `Gateway::chat` | `Observe` as a stream of events, and `Chat` to the operator of a node. Tested against an in-process node. |
 | `service-library::tunnel` | A streaming `ServiceTunnel` with the check of the signed checkpoints of the node, ported from chatui and tested against an in-process node that lies. |
 | `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`; `add_service` by hash and `add_package` from a `.bee` file; optional check of the start receipt. |
 | `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
