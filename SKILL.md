@@ -21,7 +21,9 @@ when you stop needing it.
 
 **Dependencies.** Start a dependency by the SHA3-256 of its service when the node has it
 (`add_service`), or from a `.bee` file with `add_package`: the first instance sends the file
-and the next ones start by hash. `package::inspect` tells the layout and the service id of a
+and the next ones start by hash. A node that already has the service answers after the hash and
+the file stops there; a node that has only some blocks asks for them to be skipped, and the
+library does not send them (`relay`, `skips`; `counter::SendCounter` counts what went). `package::inspect` tells the layout and the service id of a
 file (`nodo export` and `GetService` number their parts differently; both work). Take instances from the pool
 (`DependencyManager::add_service`, `ServiceHandle::acquire`) instead of starting one per
 call: a start can take minutes, because the node can build and boot the service first.
@@ -91,5 +93,4 @@ registries, so give it the network that its `service.json` asks for.
 
 - Tests against a real node: everything here is tested against a fake node and the vectors
   of nodo only.
-- Skipping blocks that the node already has when it gets a package (chatui does it).
 - `Chat` and `Observe`.

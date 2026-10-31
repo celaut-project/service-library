@@ -12,12 +12,15 @@
 //! service does that.
 
 pub mod config;
+pub mod counter;
 pub mod error;
 pub mod gateway;
 pub mod instance;
 pub mod manager;
 pub mod package;
 pub mod receipt;
+pub mod relay;
+pub mod skips;
 pub mod tunnel;
 
 pub use error::Error;

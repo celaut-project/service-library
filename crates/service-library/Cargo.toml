@@ -20,4 +20,4 @@ tonic-prost = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
-tokio = { version = "1.53", features = ["rt", "time", "sync", "macros", "test-util", "net", "io-util"] }
+tokio = { version = "1.53", features = ["rt", "time", "sync", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }

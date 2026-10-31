@@ -50,9 +50,9 @@ pub trait Node: Send + Sync + 'static {
     ) -> impl Future<Output = Result<ServiceInstance, Error>> + Send;
 
     /// Start the service of the `.bee` file at `path`, sending the file: for a node that does
-    /// not have it. `service_hash` and `layout` come from [`crate::package::inspect`]. The
-    /// whole file goes, even if the node had the service already, so use it once and then
-    /// [`Node::start`] by hash.
+    /// not have it. `info` comes from [`crate::package::inspect`]. A node that has the
+    /// service already answers after the hash and the file stops there; a node that has
+    /// only some of its blocks asks for them to be skipped (nodo#584).
     fn start_package(
         &self,
         path: &std::path::Path,
@@ -301,24 +301,26 @@ impl Node for Gateway {
         configuration: Configuration,
     ) -> Result<ServiceInstance, Error> {
         use tokio_stream::StreamExt;
-        // The head: the Configuration (3) and the Hash (4), then the Metadata and the
-        // Service of the file, in the order that StartService needs.
-        let head = bee_rpc::frame::serialize_parts(&start_parts(info.service_id, &configuration));
-        let input = tokio_stream::iter(head.into_iter().map(Ok))
-            .chain(crate::package::read(path.to_path_buf(), info.layout));
-        let options = bee_rpc::grpc::CallOptions {
-            parse: ParseOptions::accepting([1]),
-            block_skip: false,
-            timeout: Some(START_TIMEOUT),
-        };
-        let answer = bee_rpc::grpc::call_buffers(
+        // The head: the Configuration (3) and the Hash (4). Then the Metadata and the
+        // Service of the file, without the blocks that the node says it holds. A node that
+        // has the service answers after the Hash, and the call stops sending the file.
+        let head = start_parts(info.service_id, &configuration);
+        let file: crate::relay::Buffers = Box::pin(
+            crate::package::read(path.to_path_buf(), info.layout)
+                .map(|item| item.map_err(|e| Error::Protocol(format!("the package: {e}")))),
+        );
+        let skips = crate::skips::Skips::new();
+        let answer = crate::relay::call_with_service(
             self.channel.clone(),
             "/celaut.Gateway/StartService",
-            Box::pin(input),
-            options,
+            head,
+            skips.wrap(file),
+            &[1],
+            START_TIMEOUT,
+            crate::relay::EARLY_ANSWER_WAIT,
+            &skips,
         )
-        .await
-        .map_err(|e| Self::failed("starting a service from a file", 1, e))?;
+        .await?;
         let instance: ServiceInstance = find(&answer, "ServiceInstance")?;
         if instance.token.is_empty() {
             return Err(Error::Protocol(
