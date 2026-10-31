@@ -24,7 +24,12 @@ when you stop needing it.
 `.bee` file (it checks that every block holds what its id names, unless
 `ServiceOptions::verify_package` is off; the first instance sends the file, the next ones start
 by hash; a node that has the service answers after the hash and the file stops there, and a
-node that holds some blocks makes the library skip them). Adding the same pair again gives
+node that holds some blocks makes the library skip them). `add_directory_package(root, block_dir,
+service_id, configuration)` adds one that is stored as directories of the block store, the way
+services carry their dependencies: `root/__services__/<hex id>` is the Service and
+`root/__metadata__/<hex id>` the Metadata (optional), with the blocks in `block_dir`. It uses
+`bee_rpc::store` to send them (a block that is a single file is checked against its id as it
+leaves). Adding the same pair again gives
 the same pool. `ServiceOptions` gives each dependency its own number of start attempts (5 by
 default; only gateway failures are tried again), idle time, timeouts and failures.
 
@@ -108,9 +113,6 @@ registries, so give it the network that its `service.json` asks for.
 
 ## Not done yet
 
-- Dependencies that come with the service as directories (`__services__/<hash>` and
-  `__metadata__/<hash>`, as the Python library read them): bee-rpc for Rust has no reader of
-  the multiblock directory format, so only `.bee` files and hashes are supported.
 - The Python `ResourceManager` (it grew and shrank the memory of the service with a pool).
   Only the call, `Gateway::modify_resources`, is here.
 - The optional `dev_client` of the Python library (a `Client` on the start).

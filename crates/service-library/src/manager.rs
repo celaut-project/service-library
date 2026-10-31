@@ -201,6 +201,59 @@ impl<N: Node> DependencyManager<N> {
         })
         .await
         .map_err(|e| Error::Protocol(format!("the check of the package failed: {e}")))??;
+        Ok(self.register_package(path, info, configuration, options))
+    }
+
+    /// Add a dependency that is stored as directories of the block store: the Service in
+    /// `root/__services__/<hash>` and the Metadata, if there is one, in
+    /// `root/__metadata__/<hash>` (the hash is the lowercase hex of `service_id`), with the
+    /// blocks in `block_dir`. The first instance sends the objects to the node, and the
+    /// following ones start by hash. A block that is a single file is checked against its id
+    /// when it is read to be sent; `options.verify_package` has no effect here.
+    pub async fn add_directory_package(
+        self: &Arc<Self>,
+        root: impl Into<std::path::PathBuf>,
+        block_dir: impl Into<std::path::PathBuf>,
+        service_id: [u8; 32],
+        configuration: Configuration,
+    ) -> Result<ServiceHandle<N>, Error> {
+        self.add_directory_package_with(
+            root,
+            block_dir,
+            service_id,
+            configuration,
+            ServiceOptions::default(),
+        )
+        .await
+    }
+
+    /// [`DependencyManager::add_directory_package`] with options for this dependency.
+    pub async fn add_directory_package_with(
+        self: &Arc<Self>,
+        root: impl Into<std::path::PathBuf>,
+        block_dir: impl Into<std::path::PathBuf>,
+        service_id: [u8; 32],
+        configuration: Configuration,
+        options: ServiceOptions,
+    ) -> Result<ServiceHandle<N>, Error> {
+        let root = root.into();
+        let block_dir = block_dir.into();
+        let (root, info) = tokio::task::spawn_blocking(move || {
+            let info = crate::package::inspect_directory(&root, &block_dir, service_id)?;
+            Ok::<_, Error>((root, info))
+        })
+        .await
+        .map_err(|e| Error::Protocol(format!("the check of the package failed: {e}")))??;
+        Ok(self.register_package(root, info, configuration, options))
+    }
+
+    fn register_package(
+        self: &Arc<Self>,
+        path: std::path::PathBuf,
+        info: crate::package::PackageInfo,
+        configuration: Configuration,
+        options: ServiceOptions,
+    ) -> ServiceHandle<N> {
         let handle = self.add_service_with(info.service_id, configuration, options);
         if let Some(pool) = self.pools.lock().unwrap().get_mut(&handle.key) {
             if pool.package.is_none() {
@@ -211,7 +264,7 @@ impl<N: Node> DependencyManager<N> {
                 });
             }
         }
-        Ok(handle)
+        handle
     }
 
     /// How many instances wait in the pools.
@@ -799,6 +852,43 @@ mod tests {
         assert_eq!(node.started.load(Ordering::SeqCst), 2);
         assert_eq!(node.packages.load(Ordering::SeqCst), 1);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_directory_package_is_sent_once_and_a_missing_one_is_refused() {
+        let id = [4u8; 32];
+        let name: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        let root = std::env::temp_dir().join(format!("pool-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("blocks")).unwrap();
+        std::fs::create_dir_all(root.join("__services__")).unwrap();
+        // A service object that is one plain file: `_.json` names the file 1.
+        let service = root.join("__services__").join(&name);
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::write(service.join("_.json"), "[1]").unwrap();
+        std::fs::write(service.join("1"), [9u8]).unwrap();
+
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let dep = m
+            .add_directory_package(&root, root.join("blocks"), id, Configuration::default())
+            .await
+            .unwrap();
+        let (a, b) = (dep.acquire().await.unwrap(), dep.acquire().await.unwrap());
+        drop((a, b));
+        assert_eq!(node.started.load(Ordering::SeqCst), 2);
+        assert_eq!(node.packages.load(Ordering::SeqCst), 1);
+
+        let missing = m
+            .add_directory_package(
+                &root,
+                root.join("blocks"),
+                [5; 32],
+                Configuration::default(),
+            )
+            .await;
+        assert!(missing.is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

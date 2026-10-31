@@ -62,6 +62,21 @@ pub struct PackageInfo {
     pub layout: Layout,
     /// The id of the service (SHA3-256): from the hashes or the Metadata of the file.
     pub service_id: [u8; 32],
+    /// Set when the package is a directory of the block store and not a `.bee` file.
+    pub directory: Option<DirectorySource>,
+}
+
+/// A service that is stored as directories of the block store: the Service is the
+/// multiblock object `__services__/<hash>` and the Metadata is the object
+/// `__metadata__/<hash>`, with their blocks in one block directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectorySource {
+    /// `Enviroment.block_dir`: where the blocks that the objects name are.
+    pub block_dir: PathBuf,
+    /// The object of the Metadata, if the service has one.
+    pub metadata: Option<PathBuf>,
+    /// The object of the Service.
+    pub service: PathBuf,
 }
 
 fn invalid(reason: impl Into<String>) -> Error {
@@ -131,7 +146,98 @@ pub fn inspect(path: &Path) -> Result<PackageInfo, Error> {
     }
     let layout = layout.ok_or_else(|| invalid("the file is empty"))?;
     let service_id = service_id.ok_or_else(|| invalid("no SHA3-256 id of the service"))?;
-    Ok(PackageInfo { layout, service_id })
+    Ok(PackageInfo {
+        layout,
+        service_id,
+        directory: None,
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The package of a service that is in `root/__services__/<hash>` (and, if it is there,
+/// `root/__metadata__/<hash>`), with its blocks in `block_dir`. `service_id` is the SHA3-256
+/// id, and the name of the entries is its lowercase hex. Only the existence of the objects
+/// is checked: the blocks that are a single file are checked against their id when they
+/// are read to be sent, and the node checks the rest.
+pub fn inspect_directory(
+    root: &Path,
+    block_dir: &Path,
+    service_id: [u8; 32],
+) -> Result<PackageInfo, Error> {
+    let name = hex(&service_id);
+    let service = root.join("__services__").join(&name);
+    if !service.exists() {
+        return Err(invalid(format!("{} does not exist", service.display())));
+    }
+    if !block_dir.is_dir() {
+        return Err(invalid(format!(
+            "{} is not a directory of blocks",
+            block_dir.display()
+        )));
+    }
+    let metadata = root.join("__metadata__").join(&name);
+    Ok(PackageInfo {
+        layout: Layout::Gateway,
+        service_id,
+        directory: Some(DirectorySource {
+            block_dir: block_dir.to_path_buf(),
+            metadata: metadata.exists().then_some(metadata),
+            service,
+        }),
+    })
+}
+
+/// The Buffers of a package for a node: the file at `path`, or the objects of the
+/// directory source in `info`, with the indices of `StartService`.
+pub fn read_package(
+    path: PathBuf,
+    info: &PackageInfo,
+) -> impl tokio_stream::Stream<Item = Result<Buffer, bee_rpc::Error>> + Send {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Buffer, bee_rpc::Error>>(4);
+    match info.directory.clone() {
+        None => {
+            let layout = info.layout;
+            tokio::spawn(async move {
+                use tokio_stream::StreamExt;
+                let mut stream = Box::pin(read(path, layout));
+                while let Some(item) = stream.next().await {
+                    let stop = item.is_err();
+                    if tx.send(item).await.is_err() || stop {
+                        return;
+                    }
+                }
+            });
+        }
+        Some(source) => {
+            tokio::task::spawn_blocking(move || {
+                let store = bee_rpc::store::Store::new(&source.block_dir);
+                let parts = source
+                    .metadata
+                    .iter()
+                    .map(|p| (5, p))
+                    .chain(std::iter::once((6, &source.service)));
+                for (index, object) in parts {
+                    let buffers = match store.read_message(index, object) {
+                        Ok(buffers) => buffers,
+                        Err(e) => {
+                            let _ = tx.blocking_send(Err(e));
+                            return;
+                        }
+                    };
+                    for item in buffers {
+                        let stop = item.is_err();
+                        if tx.blocking_send(item).is_err() || stop {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    tokio_stream::wrappers::ReceiverStream::new(rx)
 }
 
 /// Check that each block of the package holds what its id names: the bytes of its chunks,
@@ -333,5 +439,97 @@ mod tests {
             .collect();
         assert_eq!(heads, vec![5, 6]);
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// A root with the Metadata as a plain file and the Service as a multiblock object whose
+    /// only block holds `content`. `corrupt` changes the block after it got its id.
+    fn directory(name: &str, content: &[u8], corrupt: bool) -> (PathBuf, PathBuf, [u8; 32]) {
+        let base =
+            std::env::temp_dir().join(format!("service-library-{}-{name}.dir", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let id = [7u8; 32];
+        let name = hex(&id);
+        let blocks = base.join("blocks");
+        let service = base.join("__services__").join(&name);
+        std::fs::create_dir_all(&blocks).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+        std::fs::create_dir_all(base.join("__metadata__")).unwrap();
+        std::fs::write(base.join("__metadata__").join(&name), metadata_bytes(id)).unwrap();
+        let block_id = hex(&bee_rpc::hash::HashAlgorithm::Sha3_256.digest(content));
+        let stored = if corrupt {
+            b"other".to_vec()
+        } else {
+            content.to_vec()
+        };
+        std::fs::write(blocks.join(&block_id), stored).unwrap();
+        std::fs::write(
+            service.join("_.json"),
+            format!("[[\"{block_id}\", [{}]]]", content.len()),
+        )
+        .unwrap();
+        (base, blocks, id)
+    }
+
+    async fn heads_and_bytes(path: PathBuf, info: &PackageInfo) -> (Vec<i32>, Vec<u8>, usize) {
+        let mut stream = Box::pin(read_package(path, info));
+        let (mut heads, mut bytes, mut markers) = (Vec::new(), Vec::new(), 0);
+        while let Some(buffer) = stream.next().await {
+            let buffer = buffer.unwrap();
+            heads.extend(buffer.head.map(|h| h.index));
+            if let Some(chunk) = buffer.chunk {
+                bytes.extend_from_slice(&chunk);
+            }
+            if buffer.block.is_some() {
+                markers += 1;
+            }
+        }
+        (heads, bytes, markers)
+    }
+
+    #[tokio::test]
+    async fn a_directory_package_gives_the_metadata_and_the_service_blocks() {
+        let content = vec![9u8; 5000];
+        let (base, blocks, id) = directory("ok", &content, false);
+        let info = inspect_directory(&base, &blocks, id).unwrap();
+        assert_eq!(info.service_id, id);
+        assert!(info.directory.as_ref().unwrap().metadata.is_some());
+        let (heads, bytes, markers) = heads_and_bytes(base.clone(), &info).await;
+        assert_eq!(heads, vec![5, 6]);
+        assert_eq!(markers, 2, "the start and the end marker of the block");
+        assert!(bytes.ends_with(&content));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn a_directory_package_without_metadata_sends_only_the_service() {
+        let (base, blocks, id) = directory("nometa", b"abc", false);
+        std::fs::remove_file(base.join("__metadata__").join(hex(&id))).unwrap();
+        let info = inspect_directory(&base, &blocks, id).unwrap();
+        assert!(info.directory.as_ref().unwrap().metadata.is_none());
+        let (heads, _, _) = heads_and_bytes(base.clone(), &info).await;
+        assert_eq!(heads, vec![6]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn a_block_that_does_not_hold_its_id_is_not_sent_whole() {
+        let (base, blocks, id) = directory("bad", &[1u8; 100], true);
+        let info = inspect_directory(&base, &blocks, id).unwrap();
+        let mut stream = Box::pin(read_package(base.clone(), &info));
+        let mut failed = false;
+        while let Some(item) = stream.next().await {
+            failed |= item.is_err();
+        }
+        assert!(failed, "the stream must end with an error");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_directory_without_the_service_is_refused() {
+        let base =
+            std::env::temp_dir().join(format!("service-library-{}-empty", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(inspect_directory(&base, &base, [1; 32]).is_err());
+        let _ = std::fs::remove_dir_all(base);
     }
 }

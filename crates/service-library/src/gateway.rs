@@ -346,7 +346,7 @@ impl Node for Gateway {
         // has the service answers after the Hash, and the call stops sending the file.
         let head = start_parts(info.service_id, &configuration);
         let file: crate::relay::Buffers = Box::pin(
-            crate::package::read(path.to_path_buf(), info.layout)
+            crate::package::read_package(path.to_path_buf(), info)
                 .map(|item| item.map_err(|e| Error::Protocol(format!("the package: {e}")))),
         );
         let skips = crate::skips::Skips::new();
