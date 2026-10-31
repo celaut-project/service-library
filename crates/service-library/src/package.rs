@@ -134,6 +134,57 @@ pub fn inspect(path: &Path) -> Result<PackageInfo, Error> {
     Ok(PackageInfo { layout, service_id })
 }
 
+/// Check that each block of the package holds what its id names: the bytes of its chunks,
+/// with those of the blocks inside it, hash (SHA3-256) to its id. A node refuses a block that
+/// does not, but only after it got the whole package. The file is read once, one record at a
+/// time. This reads the whole file, so call it from a thread that may block.
+pub fn verify_blocks(path: &Path) -> Result<(), Error> {
+    let file = File::open(path).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+    // The open blocks, outermost first: their id and the hash of what they hold so far.
+    let mut open: Vec<([u8; 32], bee_rpc::hash::Hasher)> = Vec::new();
+    for buffer in read_bee(BufReader::new(file)) {
+        let buffer = buffer.map_err(|e| invalid(e.to_string()))?;
+        if let Some(block) = &buffer.block {
+            let id: [u8; 32] = block
+                .hashes
+                .iter()
+                .find(|h| h.r#type == SHA3_256_TYPE)
+                .and_then(|h| h.value.as_slice().try_into().ok())
+                .ok_or_else(|| invalid("a block has no SHA3-256 id"))?;
+            if let Some((_, hasher)) = open.pop_if(|(last, _)| *last == id) {
+                // The end marker of the innermost open block.
+                let got = hasher.finalize();
+                if got != id {
+                    return Err(invalid(format!(
+                        "the block {} holds other bytes: they hash to {}",
+                        hex::encode(id),
+                        hex::encode(got)
+                    )));
+                }
+            } else if open.iter().any(|(other, _)| *other == id) {
+                return Err(invalid(format!(
+                    "the block {} ends inside a block that it holds",
+                    hex::encode(id)
+                )));
+            } else {
+                open.push((id, bee_rpc::hash::HashAlgorithm::Sha3_256.hasher()));
+            }
+        }
+        if let Some(chunk) = &buffer.chunk {
+            for (_, hasher) in open.iter_mut() {
+                hasher.update(chunk);
+            }
+        }
+    }
+    match open.last() {
+        Some((id, _)) => Err(invalid(format!(
+            "the file is cut inside the block {}",
+            hex::encode(id)
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The Buffers of the file at `path` for a node, with the indices of `StartService`. They
 /// come from a task that reads the file one record at a time. A file error ends the stream
 /// with an error, so the node gets markers that make it refuse a cut input.
@@ -221,6 +272,50 @@ mod tests {
             std::env::temp_dir().join(format!("service-library-{}-empty.bee", std::process::id()));
         File::create(&path).unwrap();
         assert!(inspect(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A file with one block that holds `content` and is named `id`.
+    fn block_file(name: &str, id: [u8; 32], content: &[u8]) -> PathBuf {
+        use bee_rpc::buffer::buffer::{block::Hash as BlockHash, Block};
+        let marker = || Buffer {
+            block: Some(Block {
+                hashes: vec![BlockHash {
+                    r#type: SHA3_256_TYPE.to_vec(),
+                    value: id.to_vec(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let chunk = Buffer {
+            chunk: Some(content.to_vec()),
+            ..Default::default()
+        };
+        let path =
+            std::env::temp_dir().join(format!("service-library-{}-{name}.bee", std::process::id()));
+        write_bee(
+            &mut File::create(&path).unwrap(),
+            [marker(), chunk, marker()],
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_block_that_holds_what_its_id_names_verifies() {
+        let id = bee_rpc::hash::HashAlgorithm::Sha3_256.digest(b"hello");
+        let path = block_file("good-block", id.as_slice().try_into().unwrap(), b"hello");
+        verify_blocks(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_block_that_holds_other_bytes_does_not_verify() {
+        let id = bee_rpc::hash::HashAlgorithm::Sha3_256.digest(b"hello");
+        let path = block_file("bad-block", id.as_slice().try_into().unwrap(), b"HELLO");
+        let err = verify_blocks(&path).unwrap_err().to_string();
+        assert!(err.contains("holds other bytes"), "{err}");
         std::fs::remove_file(path).unwrap();
     }
 

@@ -19,17 +19,27 @@ instance. Keep it private and never log it: whoever has it can stop the instance
 its balance. Keep it in memory or in the state of your own service, and stop the instance
 when you stop needing it.
 
-**Dependencies.** Start a dependency by the SHA3-256 of its service when the node has it
-(`add_service`), or from a `.bee` file with `add_package`: the first instance sends the file
-and the next ones start by hash. A node that already has the service answers after the hash and
-the file stops there; a node that has only some blocks asks for them to be skipped, and the
-library does not send them (`relay`, `skips`; `counter::SendCounter` counts what went). `package::inspect` tells the layout and the service id of a
-file (`nodo export` and `GetService` number their parts differently; both work). Take instances from the pool
-(`DependencyManager::add_service`, `ServiceHandle::acquire`) instead of starting one per
-call: a start can take minutes, because the node can build and boot the service first.
-Report how each call went (`record_success`, `record_failure`, `record_timeout`) so the pool
-stops broken instances. Call `shutdown` when the service ends: an instance that nobody stops
-keeps running and billing.
+**Dependencies.** A dependency is a service (its SHA3-256) plus a `Configuration`.
+`DependencyManager::add_service` adds one that the node has; `add_package` adds one from a
+`.bee` file (it checks that every block holds what its id names, unless
+`ServiceOptions::verify_package` is off; the first instance sends the file, the next ones start
+by hash; a node that has the service answers after the hash and the file stops there, and a
+node that holds some blocks makes the library skip them). Adding the same pair again gives
+the same pool. `ServiceOptions` gives each dependency its own number of start attempts (5 by
+default; only gateway failures are tried again), idle time, timeouts and failures.
+
+Use an instance: `ServiceHandle::acquire` gives a `Lease` (an idle instance, or a new one:
+a start can take minutes, because the node can build and boot the service first), and
+dropping the lease gives the instance back. The instance given back last goes out first, so
+the surplus ones go unused and the maintenance can stop them. Run your calls to it through
+`Lease::call(timeout, |uri| ...)`: it records a good answer, a timeout or a failure, and the
+pool stops an instance that fails or times out too often (a slow instance that still passes
+the liveness check stays). Stop one that you know is broken with `Lease::stop`.
+
+Keep the pool clean: run `spawn_maintenance(interval, tcp_is_alive)` (or `maintain` yourself
+with your own liveness check) so idle and broken instances are stopped, and call `shutdown`
+when the service ends. An instance that nobody stops keeps running and billing, and a stop
+that fails is in the report as a leak, not as success.
 
 **Costs.** Everything is paid in MU, the unit of the node. Ask the price before you start
 (`Gateway::estimated_cost`). `Configuration.initial_mu` is the most that a start can cost you;
@@ -98,5 +108,13 @@ registries, so give it the network that its `service.json` asks for.
 
 ## Not done yet
 
+- Dependencies that come with the service as directories (`__services__/<hash>` and
+  `__metadata__/<hash>`, as the Python library read them): bee-rpc for Rust has no reader of
+  the multiblock directory format, so only `.bee` files and hashes are supported.
+- The Python `ResourceManager` (it grew and shrank the memory of the service with a pool).
+  Only the call, `Gateway::modify_resources`, is here.
+- The optional `dev_client` of the Python library (a `Client` on the start).
+- Checking that the id of the service in a package is the hash of its whole Service: the
+  blocks are checked one by one, and the node checks the rest.
 - Tests against a real node: everything here is tested against a fake node and the vectors
   of nodo only.

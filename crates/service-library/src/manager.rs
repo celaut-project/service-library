@@ -40,6 +40,36 @@ impl Default for Limits {
     }
 }
 
+/// What is special about one dependency. What is `None` is what the pool has in [`Limits`].
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceOptions {
+    /// How many times a start is tried before it is an error. A start that fails with an
+    /// answer of the node that is not a gateway failure (a receipt that does not pass, an
+    /// instance with no gRPC address) is not tried again.
+    pub launch_attempts: u32,
+    /// Overrides [`Limits::idle_timeout`].
+    pub idle_timeout: Option<Duration>,
+    /// Overrides [`Limits::pass_timeout_times`].
+    pub pass_timeout_times: Option<u32>,
+    /// Overrides [`Limits::failed_attempts`].
+    pub failed_attempts: Option<u32>,
+    /// For [`DependencyManager::add_package`]: check that each block of the file holds what
+    /// its id names before it is used. It reads the whole file once.
+    pub verify_package: bool,
+}
+
+impl Default for ServiceOptions {
+    fn default() -> Self {
+        ServiceOptions {
+            launch_attempts: 5,
+            idle_timeout: None,
+            pass_timeout_times: None,
+            failed_attempts: None,
+            verify_package: true,
+        }
+    }
+}
+
 /// What one pass of [`DependencyManager::maintain`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MaintenanceReport {
@@ -75,6 +105,7 @@ struct Package {
 }
 
 struct Pool {
+    options: ServiceOptions,
     package: Option<Package>,
     service_hash: [u8; 32],
     configuration: Configuration,
@@ -112,12 +143,24 @@ impl<N: Node> DependencyManager<N> {
         service_hash: [u8; 32],
         configuration: Configuration,
     ) -> ServiceHandle<N> {
+        self.add_service_with(service_hash, configuration, ServiceOptions::default())
+    }
+
+    /// [`DependencyManager::add_service`] with options for this dependency. If the pool
+    /// exists already, it keeps the options that it has.
+    pub fn add_service_with(
+        self: &Arc<Self>,
+        service_hash: [u8; 32],
+        configuration: Configuration,
+        options: ServiceOptions,
+    ) -> ServiceHandle<N> {
         let key = (hex(&service_hash), configuration.encode_to_vec());
         self.pools
             .lock()
             .unwrap()
             .entry(key.clone())
             .or_insert_with(|| Pool {
+                options,
                 package: None,
                 service_hash,
                 configuration,
@@ -132,14 +175,33 @@ impl<N: Node> DependencyManager<N> {
     /// Add a dependency that comes as a `.bee` file. The first instance sends the file to
     /// the node, and the following ones start by hash. The file is read now only up to
     /// the Service, to know the id.
-    pub fn add_package(
+    pub async fn add_package(
         self: &Arc<Self>,
         path: impl Into<std::path::PathBuf>,
         configuration: Configuration,
     ) -> Result<ServiceHandle<N>, Error> {
+        self.add_package_with(path, configuration, ServiceOptions::default())
+            .await
+    }
+
+    /// [`DependencyManager::add_package`] with options for this dependency.
+    pub async fn add_package_with(
+        self: &Arc<Self>,
+        path: impl Into<std::path::PathBuf>,
+        configuration: Configuration,
+        options: ServiceOptions,
+    ) -> Result<ServiceHandle<N>, Error> {
         let path = path.into();
-        let info = crate::package::inspect(&path)?;
-        let handle = self.add_service(info.service_id, configuration);
+        let (path, info) = tokio::task::spawn_blocking(move || {
+            let info = crate::package::inspect(&path)?;
+            if options.verify_package {
+                crate::package::verify_blocks(&path)?;
+            }
+            Ok::<_, Error>((path, info))
+        })
+        .await
+        .map_err(|e| Error::Protocol(format!("the check of the package failed: {e}")))??;
+        let handle = self.add_service_with(info.service_id, configuration, options);
         if let Some(pool) = self.pools.lock().unwrap().get_mut(&handle.key) {
             if pool.package.is_none() {
                 pool.package = Some(Package {
@@ -174,30 +236,32 @@ impl<N: Node> DependencyManager<N> {
     {
         // The instances leave the pools for the pass: a service that asks for one meanwhile
         // starts another, and nothing waits on a stop that is slow.
-        let taken: Vec<(PoolKey, Vec<ServiceInstance>)> = {
+        let taken: Vec<(PoolKey, Limits, Vec<ServiceInstance>)> = {
             let mut pools = self.pools.lock().unwrap();
             pools
                 .iter_mut()
-                .map(|(k, p)| (k.clone(), p.idle.drain(..).collect()))
+                .map(|(k, p)| {
+                    (
+                        k.clone(),
+                        self.limits_of(&p.options),
+                        p.idle.drain(..).collect(),
+                    )
+                })
                 .collect()
         };
         let mut report = MaintenanceReport::default();
         let now = Instant::now();
-        for (key, instances) in taken {
+        for (key, limits, instances) in taken {
             let mut kept = Vec::new();
             for instance in instances {
-                let idle_too_long =
-                    now.duration_since(instance.last_used) > self.limits.idle_timeout;
-                let alive = if instance.timeouts > self.limits.pass_timeout_times {
+                let idle_too_long = now.duration_since(instance.last_used) > limits.idle_timeout;
+                let alive = if instance.timeouts > limits.pass_timeout_times {
                     is_alive(instance.uri.clone()).await
                 } else {
                     true
                 };
-                let zombie = instance.is_zombie(
-                    self.limits.pass_timeout_times,
-                    self.limits.failed_attempts,
-                    alive,
-                );
+                let zombie =
+                    instance.is_zombie(limits.pass_timeout_times, limits.failed_attempts, alive);
                 if idle_too_long || zombie {
                     match self.node.stop(&instance.token).await {
                         Ok(_) => report.stopped += 1,
@@ -289,6 +353,18 @@ impl<N: Node> DependencyManager<N> {
         }
     }
 
+    fn limits_of(&self, options: &ServiceOptions) -> Limits {
+        Limits {
+            idle_timeout: options.idle_timeout.unwrap_or(self.limits.idle_timeout),
+            pass_timeout_times: options
+                .pass_timeout_times
+                .unwrap_or(self.limits.pass_timeout_times),
+            failed_attempts: options
+                .failed_attempts
+                .unwrap_or(self.limits.failed_attempts),
+        }
+    }
+
     fn give_back(&self, key: &PoolKey, mut instance: ServiceInstance) {
         instance.last_used = Instant::now();
         if let Some(pool) = self.pools.lock().unwrap().get_mut(key) {
@@ -304,9 +380,66 @@ pub struct ServiceHandle<N: Node> {
 }
 
 impl<N: Node> ServiceHandle<N> {
-    /// An idle instance of the dependency, or a new one if none is idle.
+    /// One attempt to start an instance: from the file the first time, by hash after that,
+    /// then the checks of the receipt and of the address.
+    async fn launch(
+        &self,
+        hash: &[u8; 32],
+        configuration: &Configuration,
+        to_send: Option<&(std::path::PathBuf, crate::package::PackageInfo)>,
+    ) -> Result<ServiceInstance, Error> {
+        let started = match to_send {
+            Some((path, info)) => {
+                let started = self
+                    .manager
+                    .node
+                    .start_package(path, info, configuration.clone())
+                    .await?;
+                // The node has the service now: the next starts use the hash.
+                if let Some(Package { sent, .. }) = self
+                    .manager
+                    .pools
+                    .lock()
+                    .unwrap()
+                    .get_mut(&self.key)
+                    .and_then(|p| p.package.as_mut())
+                {
+                    *sent = true;
+                }
+                started
+            }
+            None => {
+                self.manager
+                    .node
+                    .start(*hash, configuration.clone())
+                    .await?
+            }
+        };
+        if let Err(e) = self.manager.check_receipt(&started, hash, configuration) {
+            // An instance that the service does not trust must not stay on the node.
+            let _ = self.manager.node.stop(&started.token).await;
+            return Err(e);
+        }
+        let uri = started
+            .instance
+            .as_ref()
+            .ok_or_else(|| Error::Protocol("the node gave no addresses".to_string()))
+            .and_then(grpc_uri);
+        match uri {
+            Ok(uri) => Ok(ServiceInstance::new(uri, started.token)),
+            Err(e) => {
+                // An instance that the service cannot use must not stay on the node.
+                let _ = self.manager.node.stop(&started.token).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// An idle instance of the dependency, or a new one if none is idle. The idle instance
+    /// that was given back last is the first to go out, so the surplus ones stay unused and
+    /// the pass of maintenance can stop them.
     pub async fn acquire(&self) -> Result<Lease<N>, Error> {
-        let (idle, hash, configuration, to_send) = {
+        let (idle, hash, configuration, to_send, launch_attempts) = {
             let mut pools = self.manager.pools.lock().unwrap();
             let pool = pools
                 .get_mut(&self.key)
@@ -317,53 +450,41 @@ impl<N: Node> ServiceHandle<N> {
                 .filter(|p| !p.sent)
                 .map(|p| (p.path.clone(), p.info.clone()));
             (
-                pool.idle.pop_front(),
+                pool.idle.pop_back(),
                 pool.service_hash,
                 pool.configuration.clone(),
                 to_send,
+                pool.options.launch_attempts.max(1),
             )
         };
         let instance = match idle {
             Some(instance) => instance,
             None => {
-                let started = match &to_send {
-                    Some((path, info)) => {
-                        let started = self
-                            .manager
-                            .node
-                            .start_package(path, info, configuration.clone())
-                            .await?;
-                        // The node has the service now: the next starts use the hash.
-                        if let Some(Package { sent, .. }) = self
-                            .manager
-                            .pools
-                            .lock()
-                            .unwrap()
-                            .get_mut(&self.key)
-                            .and_then(|p| p.package.as_mut())
-                        {
-                            *sent = true;
+                let mut attempt = 1;
+                loop {
+                    match self.launch(&hash, &configuration, to_send.as_ref()).await {
+                        Ok(instance) => break instance,
+                        // Only a gateway failure is tried again: a receipt that does not
+                        // pass, or an instance with no address, would fail again.
+                        Err(Error::Gateway {
+                            operation,
+                            unreachable,
+                            message,
+                            ..
+                        }) => {
+                            if attempt >= launch_attempts {
+                                return Err(Error::Gateway {
+                                    operation,
+                                    attempts: attempt,
+                                    unreachable,
+                                    message,
+                                });
+                            }
+                            tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt)))
+                                .await;
+                            attempt += 1;
                         }
-                        started
-                    }
-                    None => self.manager.node.start(hash, configuration.clone()).await?,
-                };
-                if let Err(e) = self.manager.check_receipt(&started, &hash, &configuration) {
-                    // An instance that the service does not trust must not stay on the node.
-                    let _ = self.manager.node.stop(&started.token).await;
-                    return Err(e);
-                }
-                let uri = started
-                    .instance
-                    .as_ref()
-                    .ok_or_else(|| Error::Protocol("the node gave no addresses".to_string()))
-                    .and_then(grpc_uri);
-                match uri {
-                    Ok(uri) => ServiceInstance::new(uri, started.token),
-                    Err(e) => {
-                        // An instance that the service cannot use must not stay on the node.
-                        let _ = self.manager.node.stop(&started.token).await;
-                        return Err(e);
+                        Err(other) => return Err(other),
                     }
                 }
             }
@@ -374,6 +495,25 @@ impl<N: Node> ServiceHandle<N> {
             instance: Some(instance),
         })
     }
+}
+
+/// Why a call to an instance failed ([`Lease::call`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallFailure<E> {
+    /// The call took longer than its time limit.
+    Timeout,
+    /// The call gave an error.
+    Failed(E),
+}
+
+/// The liveness check of an instance that the pool uses when you have no better one: the
+/// port of the instance accepts a TCP connection within 5 s. Give it to
+/// [`DependencyManager::maintain`].
+pub async fn tcp_is_alive(uri: String) -> bool {
+    matches!(
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(uri)).await,
+        Ok(Ok(_))
+    )
 }
 
 /// An instance that the service holds. Dropping it gives the instance back to the pool.
@@ -399,6 +539,31 @@ impl<N: Node> Lease<N> {
         &self.instance().uri
     }
 
+    /// Run a call to the instance and record how it went: a good answer clears the counts, a
+    /// call that takes longer than `timeout` is a timeout, and an error is a failure. The pool
+    /// stops an instance that fails or times out too often (see [`Limits`]).
+    pub async fn call<T, E, F, Fut>(&mut self, timeout: Duration, f: F) -> Result<T, CallFailure<E>>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let uri = self.uri().to_string();
+        match tokio::time::timeout(timeout, f(uri)).await {
+            Ok(Ok(value)) => {
+                self.instance_mut().record_success();
+                Ok(value)
+            }
+            Ok(Err(e)) => {
+                self.instance_mut().record_failure();
+                Err(CallFailure::Failed(e))
+            }
+            Err(_) => {
+                self.instance_mut().record_timeout();
+                Err(CallFailure::Timeout)
+            }
+        }
+    }
+
     /// Stop the instance now instead of giving it back. Use it for an instance that you
     /// know is broken. If the stop fails the error says that the instance may still run.
     pub async fn stop(mut self) -> Result<u128, Error> {
@@ -422,6 +587,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bee_rpc::buffer::Buffer;
     use celaut_proto::celaut::instance::{Uri, UriSlot};
     use celaut_proto::celaut::service::{api::Slot, Api};
     use celaut_proto::celaut::{Instance, ServiceInstance as Started};
@@ -434,10 +600,24 @@ mod tests {
         stopped: Mutex<Vec<String>>,
         fail_stop: bool,
         no_addresses: bool,
+        /// How many starts fail, with an error of the gateway, before one works.
+        fail_starts: AtomicUsize,
     }
 
     impl Node for Arc<FakeNode> {
         async fn start(&self, _hash: [u8; 32], _c: Configuration) -> Result<Started, Error> {
+            if self
+                .fail_starts
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(Error::Gateway {
+                    operation: "starting a service".into(),
+                    attempts: 1,
+                    unreachable: true,
+                    message: "down".into(),
+                });
+            }
             let n = self.started.fetch_add(1, Ordering::SeqCst);
             let instance = if self.no_addresses {
                 Instance::default()
@@ -610,7 +790,10 @@ mod tests {
 
         let node = Arc::new(FakeNode::default());
         let m = manager(&node);
-        let dep = m.add_package(&path, Configuration::default()).unwrap();
+        let dep = m
+            .add_package(&path, Configuration::default())
+            .await
+            .unwrap();
         let (a, b) = (dep.acquire().await.unwrap(), dep.acquire().await.unwrap());
         drop((a, b));
         assert_eq!(node.started.load(Ordering::SeqCst), 2);
@@ -654,5 +837,185 @@ mod tests {
         let dep = m.add_service([1; 32], Configuration::default());
         assert!(dep.acquire().await.is_err());
         assert_eq!(*node.stopped.lock().unwrap(), vec!["t0".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_that_fails_is_tried_again() {
+        let node = Arc::new(FakeNode {
+            fail_starts: AtomicUsize::new(2),
+            ..Default::default()
+        });
+        let m = manager(&node);
+        let dep = m.add_service([1; 32], Configuration::default());
+        assert!(dep.acquire().await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_that_never_works_says_how_many_times_it_tried() {
+        let node = Arc::new(FakeNode {
+            fail_starts: AtomicUsize::new(100),
+            ..Default::default()
+        });
+        let m = manager(&node);
+        let options = ServiceOptions {
+            launch_attempts: 3,
+            ..Default::default()
+        };
+        let dep = m.add_service_with([1; 32], Configuration::default(), options);
+        match dep.acquire().await.err().unwrap() {
+            Error::Gateway {
+                attempts,
+                unreachable,
+                ..
+            } => {
+                assert_eq!(attempts, 3);
+                assert!(unreachable);
+            }
+            other => panic!("{other}"),
+        }
+        assert_eq!(node.fail_starts.load(Ordering::SeqCst), 97);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_error_that_would_repeat_is_not_tried_again() {
+        let node = Arc::new(FakeNode {
+            no_addresses: true,
+            ..Default::default()
+        });
+        let m = manager(&node);
+        let dep = m.add_service([1; 32], Configuration::default());
+        assert!(dep.acquire().await.is_err());
+        assert_eq!(node.started.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_instance_given_back_last_goes_out_first() {
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let dep = m.add_service([1; 32], Configuration::default());
+        let (a, b) = (dep.acquire().await.unwrap(), dep.acquire().await.unwrap());
+        let (a_token, b_token) = (a.instance().token.clone(), b.instance().token.clone());
+        drop(a);
+        drop(b);
+        assert_eq!(dep.acquire().await.unwrap().instance().token, b_token);
+        assert_ne!(a_token, b_token);
+    }
+
+    #[tokio::test]
+    async fn a_dependency_can_have_its_own_limit_of_failures() {
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let options = ServiceOptions {
+            failed_attempts: Some(1),
+            ..Default::default()
+        };
+        let dep = m.add_service_with([1; 32], Configuration::default(), options);
+        let mut lease = dep.acquire().await.unwrap();
+        lease.instance_mut().record_failure();
+        lease.instance_mut().record_failure();
+        drop(lease);
+        // Two failures are more than its limit of 1, and less than the default of 20.
+        assert_eq!(m.maintain(|_| async { true }).await.stopped, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_records_how_it_went() {
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let dep = m.add_service([1; 32], Configuration::default());
+        let mut lease = dep.acquire().await.unwrap();
+        let slow = lease
+            .call(Duration::from_secs(1), |_| {
+                std::future::pending::<Result<(), ()>>()
+            })
+            .await;
+        assert_eq!(slow, Err(CallFailure::Timeout));
+        assert_eq!(lease.instance().timeouts(), 1);
+        let failed = lease
+            .call(Duration::from_secs(1), |_| async { Err::<(), _>("no") })
+            .await;
+        assert_eq!(failed, Err(CallFailure::Failed("no")));
+        assert_eq!(lease.instance().failures(), 1);
+        let uri = lease
+            .call(
+                Duration::from_secs(1),
+                |uri| async move { Ok::<_, ()>(uri) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(uri, "10.0.0.2:40000");
+        assert_eq!(
+            (lease.instance().failures(), lease.instance().timeouts()),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_package_with_a_bad_block_is_refused_unless_the_check_is_off() {
+        use bee_rpc::bee_file::write_bee;
+        use bee_rpc::buffer::buffer::{block::Hash as BlockHash, Block};
+        use bee_rpc::frame::{serialize_part, Part};
+        use celaut_proto::celaut::metadata::{hash_tag::Hash, HashTag};
+        use celaut_proto::celaut::Metadata;
+        let metadata = Metadata {
+            hashtag: Some(HashTag {
+                hash: vec![Hash {
+                    r#type: crate::gateway::SHA3_256_TYPE.to_vec(),
+                    value: vec![3; 32],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let marker = || Buffer {
+            block: Some(Block {
+                hashes: vec![BlockHash {
+                    r#type: crate::gateway::SHA3_256_TYPE.to_vec(),
+                    value: vec![1; 32],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut buffers: Vec<_> = serialize_part(&Part::new(1, metadata.encode_to_vec())).collect();
+        buffers.extend([
+            marker(),
+            Buffer {
+                chunk: Some(vec![9]),
+                ..Default::default()
+            },
+            marker(),
+        ]);
+        let path = std::env::temp_dir().join(format!("pool-bad-{}.bee", std::process::id()));
+        write_bee(&mut std::fs::File::create(&path).unwrap(), buffers).unwrap();
+
+        let m = manager(&Arc::new(FakeNode::default()));
+        // The Service part has no head here, so `inspect` stops at the end: the block hashes
+        // are what `verify_blocks` catches.
+        assert!(m
+            .add_package(&path, Configuration::default())
+            .await
+            .is_err());
+        let off = ServiceOptions {
+            verify_package: false,
+            ..Default::default()
+        };
+        assert!(m
+            .add_package_with(&path, Configuration::default(), off)
+            .await
+            .is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tcp_check_tells_an_open_port_from_a_closed_one() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = listener.local_addr().unwrap().to_string();
+        assert!(tcp_is_alive(open).await);
+        let closed = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        assert!(!tcp_is_alive(closed).await);
     }
 }
