@@ -57,7 +57,11 @@ instance may call it, the node takes a fee from the balance of the instance, and
 with the resources and the balance now. `network_resolution` gives the networks that the node
 maps for the service. Reach a dependency at the address of its instance (`Lease::uri`); when
 it has none that you can reach, `Gateway::tunnel` sends bytes to one of its ports through the
-node (the node charges the traffic to the instance, and the answer is held in memory).
+node in one request and one answer (held in memory). For a stream, `tunnel::open` (or
+`Gateway::open_tunnel`) gives channels to and from the service and checks the signed
+checkpoints of the node against the bytes that you sent and got (`tunnel::ReceiptSink`); give
+the gateway the identity of the node with `Gateway::with_peer_id` so they must name it. The
+node charges the traffic to the instance.
 
 **Not your concern.** Choosing between nodes, and balancing the load, belong to the node of the
 service and to clients. A service talks to one gateway.
@@ -87,7 +91,5 @@ registries, so give it the network that its `service.json` asks for.
 
 - Tests against a real node: everything here is tested against a fake node and the vectors
   of nodo only.
-- Tunnel receipts (the checkpoints at index 2) and a streaming tunnel: `Gateway::tunnel`
-  is one request and one answer.
 - Skipping blocks that the node already has when it gets a package (chatui does it).
 - `Chat` and `Observe`.

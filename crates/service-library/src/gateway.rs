@@ -68,6 +68,7 @@ pub trait Node: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct Gateway {
     channel: Channel,
+    peer_id: Option<String>,
 }
 
 impl Gateway {
@@ -78,6 +79,7 @@ impl Gateway {
             .tcp_nodelay(true);
         Ok(Gateway {
             channel: endpoint.connect_lazy(),
+            peer_id: None,
         })
     }
 
@@ -164,6 +166,23 @@ impl Gateway {
             // A false bool and an empty text have no bytes.
             None => Ok(ModifyDepositOutput::default()),
         }
+    }
+
+    /// The channel of the gateway, for the tunnel.
+    pub fn channel(&self) -> Channel {
+        self.channel.clone()
+    }
+
+    /// The `peer_id` that the receipts of a tunnel must name. A service does not know the
+    /// identity of its node unless it was told: see [`Gateway::with_peer_id`].
+    pub fn peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
+    }
+
+    /// The same gateway, with the `peer_id` of the node that the receipts must name.
+    pub fn with_peer_id(mut self, peer_id: impl Into<String>) -> Self {
+        self.peer_id = Some(peer_id.into());
+        self
     }
 
     /// `ServiceTunnel`: send `payload` to the port `slot` of the local instance `token`, close

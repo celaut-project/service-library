@@ -18,5 +18,6 @@ pub mod instance;
 pub mod manager;
 pub mod package;
 pub mod receipt;
+pub mod tunnel;
 
 pub use error::Error;
