@@ -111,10 +111,27 @@ Check that the id you start is the one that the packer said, and keep the budget
 instance small (`Configuration.initial_mu`). Packing needs the packer to reach container
 registries, so give it the network that its `service.json` asks for.
 
+## Memory of the service
+
+`resources::ResourceManager` is a pool of memory that grows and shrinks with the jobs of the
+service (the `ResourceManager` of the Python library). Build it with the `mem_limit` that the
+node gave the service and a `Resizer` (`Gateway` is one, through `ModifyServiceSystemResources`):
+
+```rust
+let memory = ResourceManager::new(gateway.clone(), initial_mem_limit);
+let lock = memory.lock(job_bytes).await?;   // waits; asks the node for more if the pool is small
+// ... allocate and work ...
+lock.release().await;                        // or drop it; the pool shrinks to what is locked
+```
+
+`lock_for(len, limit)` gives up after a time and `try_lock(len)` does not wait. The node
+charges a fee per request: the manager asks for `locked + waiting` when memory is short, asks
+for `locked` when the last waiter is served and memory is unlocked, and never asks twice in a
+row for the same amount. `stats()` gives the pool, what is locked and waiting, and the balance
+in MU that the node reported on the last request. Only a local instance may use this call.
+
 ## Not done yet
 
-- The Python `ResourceManager` (it grew and shrank the memory of the service with a pool).
-  Only the call, `Gateway::modify_resources`, is here.
 - The optional `dev_client` of the Python library (a `Client` on the start).
 - Checking that the id of the service in a package is the hash of its whole Service: the
   blocks are checked one by one, and the node checks the rest.

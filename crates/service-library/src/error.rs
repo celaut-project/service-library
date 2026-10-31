@@ -25,6 +25,10 @@ pub enum Error {
     /// The start receipt of an instance did not pass the check. The instance was stopped.
     #[error("the start receipt is not acceptable: {0}")]
     Receipt(String),
+    /// The memory that a service asked for cannot be had: the pool has no room and the node
+    /// would not grow it, or the time to wait ended.
+    #[error("not enough memory: {0}")]
+    Resources(String),
     /// The gateway answered something that is not usable.
     #[error("unexpected answer: {0}")]
     Protocol(String),

@@ -21,6 +21,7 @@ pub mod observe;
 pub mod package;
 pub mod receipt;
 pub mod relay;
+pub mod resources;
 pub mod skips;
 pub mod tunnel;
 
