@@ -16,5 +16,7 @@ pub mod error;
 pub mod gateway;
 pub mod instance;
 pub mod manager;
+pub mod package;
+pub mod receipt;
 
 pub use error::Error;

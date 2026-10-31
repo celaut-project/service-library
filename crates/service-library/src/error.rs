@@ -22,6 +22,9 @@ pub enum Error {
         /// The last error.
         message: String,
     },
+    /// The start receipt of an instance did not pass the check. The instance was stopped.
+    #[error("the start receipt is not acceptable: {0}")]
+    Receipt(String),
     /// The gateway answered something that is not usable.
     #[error("unexpected answer: {0}")]
     Protocol(String),

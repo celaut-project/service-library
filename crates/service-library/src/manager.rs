@@ -49,9 +49,33 @@ pub struct MaintenanceReport {
     pub leaked: Vec<String>,
 }
 
+/// What the pool does with the start receipt of a new instance (nodo#419).
+#[derive(Debug, Clone, Default)]
+pub enum ReceiptCheck {
+    /// Do not look at it.
+    #[default]
+    Off,
+    /// Check it, and stop an instance whose receipt fails. `peer_id` is the identity of the
+    /// node, if the service knows it: without it the check proves only that some key signed
+    /// the receipt. `require` also refuses an instance with no receipt (a node with no
+    /// identity key gives none).
+    Check {
+        peer_id: Option<String>,
+        require: bool,
+    },
+}
+
 type PoolKey = (String, Vec<u8>);
 
+/// A service that comes as a file: the first start sends it, the next ones use the hash.
+struct Package {
+    path: std::path::PathBuf,
+    info: crate::package::PackageInfo,
+    sent: bool,
+}
+
 struct Pool {
+    package: Option<Package>,
     service_hash: [u8; 32],
     configuration: Configuration,
     idle: VecDeque<ServiceInstance>,
@@ -61,15 +85,22 @@ struct Pool {
 pub struct DependencyManager<N: Node> {
     node: N,
     limits: Limits,
+    receipts: ReceiptCheck,
     pools: Mutex<HashMap<PoolKey, Pool>>,
 }
 
 impl<N: Node> DependencyManager<N> {
     /// A pool on `node`.
     pub fn new(node: N, limits: Limits) -> Arc<Self> {
+        Self::with_receipts(node, limits, ReceiptCheck::Off)
+    }
+
+    /// A pool on `node` that checks the start receipt of each new instance.
+    pub fn with_receipts(node: N, limits: Limits, receipts: ReceiptCheck) -> Arc<Self> {
         Arc::new(DependencyManager {
             node,
             limits,
+            receipts,
             pools: Mutex::new(HashMap::new()),
         })
     }
@@ -87,6 +118,7 @@ impl<N: Node> DependencyManager<N> {
             .unwrap()
             .entry(key.clone())
             .or_insert_with(|| Pool {
+                package: None,
                 service_hash,
                 configuration,
                 idle: VecDeque::new(),
@@ -95,6 +127,29 @@ impl<N: Node> DependencyManager<N> {
             manager: self.clone(),
             key,
         }
+    }
+
+    /// Add a dependency that comes as a `.bee` file. The first instance sends the file to
+    /// the node, and the following ones start by hash. The file is read now only up to
+    /// the Service, to know the id.
+    pub fn add_package(
+        self: &Arc<Self>,
+        path: impl Into<std::path::PathBuf>,
+        configuration: Configuration,
+    ) -> Result<ServiceHandle<N>, Error> {
+        let path = path.into();
+        let info = crate::package::inspect(&path)?;
+        let handle = self.add_service(info.service_id, configuration);
+        if let Some(pool) = self.pools.lock().unwrap().get_mut(&handle.key) {
+            if pool.package.is_none() {
+                pool.package = Some(Package {
+                    path,
+                    info,
+                    sent: false,
+                });
+            }
+        }
+        Ok(handle)
     }
 
     /// How many instances wait in the pools.
@@ -196,6 +251,44 @@ impl<N: Node> DependencyManager<N> {
         report
     }
 
+    fn check_receipt(
+        &self,
+        started: &celaut_proto::celaut::ServiceInstance,
+        hash: &[u8; 32],
+        configuration: &Configuration,
+    ) -> Result<(), Error> {
+        let ReceiptCheck::Check { peer_id, require } = &self.receipts else {
+            return Ok(());
+        };
+        let Some(receipt) = &started.receipt else {
+            return if *require {
+                Err(Error::Receipt("the node gave no receipt".to_string()))
+            } else {
+                Ok(())
+            };
+        };
+        let initial = configuration.initial_mu.as_ref().map(|a| a.n.as_str());
+        let faults = crate::receipt::check_start(
+            receipt,
+            peer_id.as_deref(),
+            &started.token,
+            hash,
+            &configuration.environment_variables,
+            initial,
+        );
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Receipt(
+                faults
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ))
+        }
+    }
+
     fn give_back(&self, key: &PoolKey, mut instance: ServiceInstance) {
         instance.last_used = Instant::now();
         if let Some(pool) = self.pools.lock().unwrap().get_mut(key) {
@@ -213,21 +306,53 @@ pub struct ServiceHandle<N: Node> {
 impl<N: Node> ServiceHandle<N> {
     /// An idle instance of the dependency, or a new one if none is idle.
     pub async fn acquire(&self) -> Result<Lease<N>, Error> {
-        let (idle, hash, configuration) = {
+        let (idle, hash, configuration, to_send) = {
             let mut pools = self.manager.pools.lock().unwrap();
             let pool = pools
                 .get_mut(&self.key)
                 .ok_or_else(|| Error::Protocol("the dependency was removed".to_string()))?;
+            let to_send = pool
+                .package
+                .as_ref()
+                .filter(|p| !p.sent)
+                .map(|p| (p.path.clone(), p.info.clone()));
             (
                 pool.idle.pop_front(),
                 pool.service_hash,
                 pool.configuration.clone(),
+                to_send,
             )
         };
         let instance = match idle {
             Some(instance) => instance,
             None => {
-                let started = self.manager.node.start(hash, configuration).await?;
+                let started = match &to_send {
+                    Some((path, info)) => {
+                        let started = self
+                            .manager
+                            .node
+                            .start_package(path, info, configuration.clone())
+                            .await?;
+                        // The node has the service now: the next starts use the hash.
+                        if let Some(Package { sent, .. }) = self
+                            .manager
+                            .pools
+                            .lock()
+                            .unwrap()
+                            .get_mut(&self.key)
+                            .and_then(|p| p.package.as_mut())
+                        {
+                            *sent = true;
+                        }
+                        started
+                    }
+                    None => self.manager.node.start(hash, configuration.clone()).await?,
+                };
+                if let Err(e) = self.manager.check_receipt(&started, &hash, &configuration) {
+                    // An instance that the service does not trust must not stay on the node.
+                    let _ = self.manager.node.stop(&started.token).await;
+                    return Err(e);
+                }
                 let uri = started
                     .instance
                     .as_ref()
@@ -305,6 +430,7 @@ mod tests {
     #[derive(Default)]
     struct FakeNode {
         started: AtomicUsize,
+        packages: AtomicUsize,
         stopped: Mutex<Vec<String>>,
         fail_stop: bool,
         no_addresses: bool,
@@ -338,6 +464,16 @@ mod tests {
                 instance: Some(instance),
                 receipt: None,
             })
+        }
+
+        async fn start_package(
+            &self,
+            _path: &std::path::Path,
+            info: &crate::package::PackageInfo,
+            c: Configuration,
+        ) -> Result<Started, Error> {
+            self.packages.fetch_add(1, Ordering::SeqCst);
+            self.start(info.service_id, c).await
         }
 
         async fn stop(&self, token: &str) -> Result<u128, Error> {
@@ -449,6 +585,63 @@ mod tests {
         let report = m.shutdown().await;
         assert_eq!(report.stopped, 0);
         assert_eq!(report.leaked.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_package_is_sent_with_the_first_instance_and_the_next_start_by_hash() {
+        use bee_rpc::bee_file::write_bee;
+        use bee_rpc::frame::{serialize_part, Part};
+        use celaut_proto::celaut::metadata::{hash_tag::Hash, HashTag};
+        use celaut_proto::celaut::Metadata;
+        let metadata = Metadata {
+            hashtag: Some(HashTag {
+                hash: vec![Hash {
+                    r#type: crate::gateway::SHA3_256_TYPE.to_vec(),
+                    value: vec![3; 32],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let path = std::env::temp_dir().join(format!("pool-{}.bee", std::process::id()));
+        let mut buffers: Vec<_> = serialize_part(&Part::new(1, metadata.encode_to_vec())).collect();
+        buffers.extend(serialize_part(&Part::new(2, vec![9])));
+        write_bee(&mut std::fs::File::create(&path).unwrap(), buffers).unwrap();
+
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let dep = m.add_package(&path, Configuration::default()).unwrap();
+        let (a, b) = (dep.acquire().await.unwrap(), dep.acquire().await.unwrap());
+        drop((a, b));
+        assert_eq!(node.started.load(Ordering::SeqCst), 2);
+        assert_eq!(node.packages.load(Ordering::SeqCst), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_missing_receipt_is_refused_only_when_it_is_required() {
+        let check = |require| ReceiptCheck::Check {
+            peer_id: None,
+            require,
+        };
+        let node = Arc::new(FakeNode::default());
+        let lax = DependencyManager::with_receipts(node.clone(), Limits::default(), check(false));
+        assert!(lax
+            .add_service([1; 32], Configuration::default())
+            .acquire()
+            .await
+            .is_ok());
+
+        let strict = DependencyManager::with_receipts(node.clone(), Limits::default(), check(true));
+        let err = strict
+            .add_service([2; 32], Configuration::default())
+            .acquire()
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::Receipt(_)));
+        // The instance with no receipt was stopped.
+        assert_eq!(node.stopped.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

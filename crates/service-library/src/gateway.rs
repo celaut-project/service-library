@@ -13,7 +13,8 @@ use bee_rpc::frame::{ParseOptions, Part};
 use celaut_proto::celaut::metadata::hash_tag::Hash;
 use celaut_proto::celaut::{
     Amount, Client, Configuration, EstimatedCost, Metrics, ModifyDepositInput, ModifyDepositOutput,
-    Refund, ServiceInstance, TokenMessage,
+    ModifyServiceSystemResourcesInput, ModifyServiceSystemResourcesOutput, Refund, ServiceInstance,
+    Sysresources, TokenMessage,
 };
 use prost::Message;
 use tonic::transport::{Channel, Endpoint};
@@ -45,6 +46,17 @@ pub trait Node: Send + Sync + 'static {
     fn start(
         &self,
         service_hash: [u8; 32],
+        configuration: Configuration,
+    ) -> impl Future<Output = Result<ServiceInstance, Error>> + Send;
+
+    /// Start the service of the `.bee` file at `path`, sending the file: for a node that does
+    /// not have it. `service_hash` and `layout` come from [`crate::package::inspect`]. The
+    /// whole file goes, even if the node had the service already, so use it once and then
+    /// [`Node::start`] by hash.
+    fn start_package(
+        &self,
+        path: &std::path::Path,
+        info: &crate::package::PackageInfo,
         configuration: Configuration,
     ) -> impl Future<Output = Result<ServiceInstance, Error>> + Send;
 
@@ -154,6 +166,55 @@ impl Gateway {
         }
     }
 
+    /// `ServiceTunnel`: send `payload` to the port `slot` of the local instance `token`, close
+    /// the write side, and give everything that comes back. For an instance that has no
+    /// address that the service can reach. The node takes the traffic cost from the balance
+    /// of the instance. It holds the whole answer in memory: for a stream, open the tunnel
+    /// with `bee_rpc` directly.
+    pub async fn tunnel(&self, token: &str, slot: u16, payload: &[u8]) -> Result<Vec<u8>, Error> {
+        let answer = self
+            .call(
+                "ServiceTunnel",
+                tunnel_parts(token, slot, payload),
+                &[0],
+                START_TIMEOUT,
+            )
+            .await
+            .map_err(|e| Self::failed("using the tunnel of an instance", 1, e))?;
+        Ok(answer
+            .into_iter()
+            .filter(|p| p.index == 0)
+            .flat_map(|p| p.data)
+            .collect())
+    }
+
+    /// `ModifyServiceSystemResources`: ask the node for the resources `max` for this
+    /// service. Only a local instance may call it, and the node takes a fee from the
+    /// balance of the instance. It gives the resources that the service has now, and its
+    /// balance in MU.
+    pub async fn modify_resources(
+        &self,
+        max: Sysresources,
+    ) -> Result<ModifyServiceSystemResourcesOutput, Error> {
+        let input = ModifyServiceSystemResourcesInput {
+            min_sysreq: None,
+            max_sysreq: Some(max),
+        };
+        let answer = self
+            .call(
+                "ModifyServiceSystemResources",
+                vec![Part::new(1, input.encode_to_vec())],
+                &[1],
+                CALL_TIMEOUT,
+            )
+            .await
+            .map_err(|e| Self::failed("changing the resources of the service", 1, e))?;
+        match answer.iter().find(|p| p.index == 1) {
+            Some(part) => decode(part, "ModifyServiceSystemResourcesOutput"),
+            None => Ok(ModifyServiceSystemResourcesOutput::default()),
+        }
+    }
+
     /// [`Node::stop`], tried up to [`STOP_MAX_ATTEMPTS`] times with a pause that grows.
     /// If every attempt fails, the instance can still be running and billing: the error
     /// says so, with the last error of the node.
@@ -214,9 +275,64 @@ impl Node for Gateway {
         Ok(instance)
     }
 
+    async fn start_package(
+        &self,
+        path: &std::path::Path,
+        info: &crate::package::PackageInfo,
+        configuration: Configuration,
+    ) -> Result<ServiceInstance, Error> {
+        use tokio_stream::StreamExt;
+        // The head: the Configuration (3) and the Hash (4), then the Metadata and the
+        // Service of the file, in the order that StartService needs.
+        let head = bee_rpc::frame::serialize_parts(&start_parts(info.service_id, &configuration));
+        let input = tokio_stream::iter(head.into_iter().map(Ok))
+            .chain(crate::package::read(path.to_path_buf(), info.layout));
+        let options = bee_rpc::grpc::CallOptions {
+            parse: ParseOptions::accepting([1]),
+            block_skip: false,
+            timeout: Some(START_TIMEOUT),
+        };
+        let answer = bee_rpc::grpc::call_buffers(
+            self.channel.clone(),
+            "/celaut.Gateway/StartService",
+            Box::pin(input),
+            options,
+        )
+        .await
+        .map_err(|e| Self::failed("starting a service from a file", 1, e))?;
+        let instance: ServiceInstance = find(&answer, "ServiceInstance")?;
+        if instance.token.is_empty() {
+            return Err(Error::Protocol(
+                "the node gave an instance with no token".to_string(),
+            ));
+        }
+        Ok(instance)
+    }
+
     async fn stop(&self, token: &str) -> Result<u128, Error> {
         self.stop_with_retries(token).await
     }
+}
+
+/// The bytes of one message of a tunnel: the node reads the bytes at index 0 in pieces.
+pub const TUNNEL_PIECE: usize = 64 * 1024;
+
+/// The parts of a `ServiceTunnel` request: the handshake (1), then `payload` at index 0 in
+/// pieces of [`TUNNEL_PIECE`]. The end of the request half-closes the connection to the
+/// service.
+pub fn tunnel_parts(token: &str, slot: u16, payload: &[u8]) -> Vec<Part> {
+    let handshake = TokenMessage {
+        token: token.to_string(),
+        slot: Some(slot.to_string()),
+        receipts: false,
+    };
+    let mut parts = vec![Part::new(1, handshake.encode_to_vec())];
+    parts.extend(
+        payload
+            .chunks(TUNNEL_PIECE)
+            .map(|c| Part::new(0, c.to_vec())),
+    );
+    parts
 }
 
 /// The parts of `StartService` for a service that the node has: the Configuration (3, only
@@ -304,6 +420,26 @@ mod tests {
             parts.iter().map(|p| p.index).collect::<Vec<_>>(),
             vec![3, 4]
         );
+    }
+
+    #[test]
+    fn a_tunnel_request_has_the_handshake_then_the_bytes_in_pieces() {
+        let payload = vec![7u8; TUNNEL_PIECE + 10];
+        let parts = tunnel_parts("tok", 8080, &payload);
+        assert_eq!(
+            parts.iter().map(|p| p.index).collect::<Vec<_>>(),
+            vec![1, 0, 0]
+        );
+        let handshake = TokenMessage::decode(parts[0].data.as_slice()).unwrap();
+        assert_eq!(handshake.token, "tok");
+        assert_eq!(handshake.slot.as_deref(), Some("8080"));
+        assert_eq!(parts[1].data.len(), TUNNEL_PIECE);
+        assert_eq!(parts[2].data.len(), 10);
+    }
+
+    #[test]
+    fn an_empty_payload_sends_only_the_handshake() {
+        assert_eq!(tunnel_parts("t", 1, &[]).len(), 1);
     }
 
     #[test]

@@ -12,13 +12,15 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `crates/celaut-proto` | The protobuf types of the gateway (`celaut.proto`, `buffer.proto`), copied from nodo. `protos/SOURCE` has the commit. |
 | `service-library::config` | Reads the `ConfigurationFile` of `/__config__`: the gateway address and the memory limit. |
 | `service-library::gateway` | The calls of a service: `StartService` (by hash), `StopService` (with retries), `ModifyDeposit`, `GetMetrics`, `GetServiceEstimatedCost`. A service sends no `Client`. |
-| `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`. |
+| `service-library::gateway` (more) | `ModifyServiceSystemResources` (`modify_resources`) and `ServiceTunnel` (`tunnel`, one request and one answer). |
+| `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`; `add_service` by hash and `add_package` from a `.bee` file; optional check of the start receipt. |
+| `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
+| `service-library::receipt` | The check of execution receipts, ported from chatui with the vectors of nodo (`check_start` for the start receipt). |
 | `SKILL.md` | What an AI agent that runs as a service has to know, and what it can leave out. |
 
 ## Not done yet
 
-See the end of `SKILL.md`: starting a service the node does not have, resources and
-`ServiceTunnel`, receipt checks, chat and `Observe`.
+See the end of `SKILL.md`. Nothing was tried against a real node yet.
 
 ## Develop
 

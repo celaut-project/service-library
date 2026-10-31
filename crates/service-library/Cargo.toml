@@ -10,6 +10,10 @@ bee-rpc = { workspace = true }
 celaut-proto = { workspace = true }
 prost = "0.14"
 thiserror = "2"
+blake2 = "0.11"
+ring = "0.17"
+hex = "0.4"
+tokio-stream = { version = "0.1", default-features = false }
 tokio = { version = "1.53", features = ["rt", "time", "sync", "macros"] }
 tonic = { version = "0.14", default-features = false, features = ["transport"] }
 
