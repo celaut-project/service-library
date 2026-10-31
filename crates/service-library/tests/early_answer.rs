@@ -513,7 +513,7 @@ async fn a_cancel_still_sends_the_markers_and_the_node_refuses() {
     assert_eq!(seen.service_len, None);
     match end {
         End::Refused(_) => assert_eq!(seen.indices, [4, 5]),
-        End::Reset(_) => assert!(seen.indices.starts_with(&[1, 2]), "{:?}", seen.indices),
+        End::Reset(_) => assert!(seen.indices.starts_with(&[4]), "{:?}", seen.indices),
         End::Clean => panic!("the node took the cut service as complete"),
     }
 }
