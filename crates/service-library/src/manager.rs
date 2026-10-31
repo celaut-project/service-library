@@ -490,7 +490,9 @@ impl<N: Node> ServiceHandle<N> {
 
     /// An idle instance of the dependency, or a new one if none is idle. The idle instance
     /// that was given back last is the first to go out, so the surplus ones stay unused and
-    /// the pass of maintenance can stop them.
+    /// the pass of maintenance can stop them. An instance that already failed too often
+    /// ([`Limits::failed_attempts`]) is not given out: it waits for the next pass of
+    /// maintenance, which stops it.
     pub async fn acquire(&self) -> Result<Lease<N>, Error> {
         let (idle, hash, configuration, to_send, launch_attempts) = {
             let mut pools = self.manager.pools.lock().unwrap();
@@ -502,8 +504,15 @@ impl<N: Node> ServiceHandle<N> {
                 .as_ref()
                 .filter(|p| !p.sent)
                 .map(|p| (p.path.clone(), p.info.clone()));
+            let limits = self.manager.limits_of(&pool.options);
+            // Only the failures are looked at: an instance that timed out needs the liveness
+            // check of `maintain`, which `acquire` does not run.
+            let usable = pool
+                .idle
+                .iter()
+                .rposition(|i| !i.is_zombie(u32::MAX, limits.failed_attempts, true));
             (
-                pool.idle.pop_back(),
+                usable.and_then(|at| pool.idle.remove(at)),
                 pool.service_hash,
                 pool.configuration.clone(),
                 to_send,
@@ -1095,6 +1104,33 @@ mod tests {
             .await
             .is_ok());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_failed_too_often_is_not_given_out_again() {
+        let node = Arc::new(FakeNode::default());
+        let m = manager(&node);
+        let h = m.add_service([7; 32], Configuration::default());
+        let healthy = h.acquire().await.unwrap();
+        let mut broken = h.acquire().await.unwrap();
+        let broken_uri = broken.uri().to_string();
+        for _ in 0..=Limits::default().failed_attempts {
+            broken.instance_mut().record_failure();
+        }
+        // The broken one goes back last, so it would be the first out.
+        drop(healthy);
+        drop(broken);
+        let next = h.acquire().await.unwrap();
+        assert_ne!(next.uri(), broken_uri);
+        // With no other idle instance, a new one starts: the broken one stays for the pass of
+        // maintenance, which stops it.
+        let another = h.acquire().await.unwrap();
+        assert_ne!(another.uri(), broken_uri);
+        assert_eq!(node.started.load(Ordering::SeqCst), 3);
+        drop((next, another));
+        let report = m.maintain(|_| async { true }).await;
+        assert_eq!(report.stopped, 1);
+        assert_eq!(*node.stopped.lock().unwrap(), vec!["t1".to_string()]);
     }
 
     #[tokio::test]
