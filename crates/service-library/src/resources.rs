@@ -492,19 +492,20 @@ mod tests {
     #[tokio::test]
     async fn a_waiter_is_woken_when_the_pool_grows_for_it() {
         let node = Arc::new(RaisableResizer {
-            cap: AtomicU64::new(120),
+            cap: AtomicU64::new(220),
         });
         let m = ResourceManager::new(node.clone(), 100);
         let _full = m.lock(100).await.unwrap();
-        // A asks for 150 and the node gives 120: A waits.
+        // A asks for 100 + 100 + 50 and the node gives 220: the room is 120, 20 are free and
+        // A waits.
         let a = tokio::spawn({
             let m = m.clone();
             async move { m.lock(50).await.unwrap().len() }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!a.is_finished());
-        // Another lock now asks for 100 + 50 + 30 and gets it: the pool has room for A, and
-        // nobody unlocks anything.
+        // Another lock now asks for 100 + 100 + 50 + 30 and gets it: the pool has room for A,
+        // and nobody unlocks anything.
         node.cap.store(1000, Ordering::SeqCst);
         let _c = m.lock(30).await.unwrap();
         let woken = tokio::time::timeout(Duration::from_secs(2), a).await;
