@@ -187,6 +187,9 @@ impl<R: Resizer> ResourceManager<R> {
                 if state.available() < len && self.waiting_sum() > state.available() {
                     let request = state.limit_for(state.locked.saturating_add(self.waiting_sum()));
                     self.update(&mut state, request).await?;
+                    // The request counted every waiter, so the pool may now hold one that
+                    // is parked: wake them all to look again, once this check is done.
+                    self.changed.notify_waiters();
                 }
                 if state.available() >= len {
                     state.locked += len;
@@ -470,6 +473,42 @@ mod tests {
         assert_eq!(m.stats().await.waiting, 60);
         a.release().await;
         assert_eq!(waiter.await.unwrap(), 60);
+    }
+
+    /// A node whose cap can be raised after the first requests.
+    struct RaisableResizer {
+        cap: AtomicU64,
+    }
+
+    impl Resizer for Arc<RaisableResizer> {
+        async fn resize(&self, mem_limit: u64) -> Result<Resized, Error> {
+            Ok(Resized {
+                mem_limit: mem_limit.min(self.cap.load(Ordering::SeqCst)),
+                balance_mu: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_waiter_is_woken_when_the_pool_grows_for_it() {
+        let node = Arc::new(RaisableResizer {
+            cap: AtomicU64::new(120),
+        });
+        let m = ResourceManager::new(node.clone(), 100);
+        let _full = m.lock(100).await.unwrap();
+        // A asks for 150 and the node gives 120: A waits.
+        let a = tokio::spawn({
+            let m = m.clone();
+            async move { m.lock(50).await.unwrap().len() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!a.is_finished());
+        // Another lock now asks for 100 + 50 + 30 and gets it: the pool has room for A, and
+        // nobody unlocks anything.
+        node.cap.store(1000, Ordering::SeqCst);
+        let _c = m.lock(30).await.unwrap();
+        let woken = tokio::time::timeout(Duration::from_secs(2), a).await;
+        assert_eq!(woken.expect("A was not woken").unwrap(), 50);
     }
 
     #[tokio::test]
