@@ -2,12 +2,20 @@
 
 use tokio::time::Instant;
 
+/// A short name for an instance token that is safe to log: the first 8 hex digits of the
+/// hash of the token. The token is a credential (it stops the instance and reads its
+/// balance), so errors and `Debug` output name the instance by this and never by the token.
+pub fn token_tag(token: &str) -> String {
+    let digest = crate::receipt::blake2b_256_hex(token.as_bytes());
+    digest.chars().take(8).collect()
+}
+
 /// An instance of a dependency, with what the pool knows about how it behaves.
 ///
 /// While an instance is out of the pool, the one that holds it must give it back or stop it.
 /// An instance that nobody holds and nobody stops stays on the node, and bills, until the
 /// service is removed.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceInstance {
     /// `ip:port` of the gRPC port of the instance.
     pub uri: String,
@@ -17,6 +25,23 @@ pub struct ServiceInstance {
     pub(crate) last_used: Instant,
     pub(crate) timeouts: u32,
     pub(crate) failures: u32,
+}
+
+impl std::fmt::Debug for ServiceInstance {
+    /// The token is left out: it is a credential, and `Debug` output is logged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceInstance")
+            .field("uri", &self.uri)
+            .field(
+                "token",
+                &format_args!("<redacted {}>", token_tag(&self.token)),
+            )
+            .field("created", &self.created)
+            .field("last_used", &self.last_used)
+            .field("timeouts", &self.timeouts)
+            .field("failures", &self.failures)
+            .finish()
+    }
 }
 
 impl ServiceInstance {
@@ -77,6 +102,20 @@ mod tests {
 
     fn instance() -> ServiceInstance {
         ServiceInstance::new("10.0.0.2:50051".into(), "token".into())
+    }
+
+    #[test]
+    fn debug_output_does_not_hold_the_token() {
+        let text = format!("{:?}", instance());
+        assert!(!text.contains("\"token\""), "{text}");
+        assert!(text.contains(&token_tag("token")), "{text}");
+    }
+
+    #[test]
+    fn a_tag_is_short_stable_and_not_the_token() {
+        assert_eq!(token_tag("abc"), token_tag("abc"));
+        assert_ne!(token_tag("abc"), token_tag("abd"));
+        assert_eq!(token_tag("abc").len(), 8);
     }
 
     #[test]

@@ -16,8 +16,9 @@ service reads from it where its gateway is. Use the `service-library` crate for 
 the node knows the caller. Each instance that the service starts has the service as its
 father, and the **instance token** of the answer of `StartService` is the credential for that
 instance. Keep it private and never log it: whoever has it can stop the instance and read
-its balance. Keep it in memory or in the state of your own service, and stop the instance
-when you stop needing it.
+its balance. The library follows this: errors and `Debug` output name an instance by
+`instance::token_tag`, a short hash of the token. Keep the token in memory or in the state of your
+own service, and stop the instance when you stop needing it.
 
 **Dependencies.** A dependency is a service (its SHA3-256) plus a `Configuration`.
 `DependencyManager::add_service` adds one that the node has; `add_package` adds one from a

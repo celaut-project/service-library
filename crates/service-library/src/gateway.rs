@@ -302,12 +302,21 @@ impl Gateway {
                 }
             }
         }
-        Err(Self::failed(
-            &format!("stopping the instance {token} (it may still be running)"),
-            STOP_MAX_ATTEMPTS,
-            last.expect("at least one attempt"),
-        ))
+        Err(stop_error(token, last.expect("at least one attempt")))
     }
+}
+
+/// The error of a stop that failed on every attempt. It names the instance by its
+/// [`token_tag`], and not by the token: the token is a credential, and an error is logged.
+fn stop_error(token: &str, last: bee_rpc::Error) -> Error {
+    Gateway::failed(
+        &format!(
+            "stopping the instance {} (it may still be running)",
+            crate::instance::token_tag(token)
+        ),
+        STOP_MAX_ATTEMPTS,
+        last,
+    )
 }
 
 impl Node for Gateway {
@@ -501,6 +510,16 @@ mod tests {
     #[test]
     fn an_empty_payload_sends_only_the_handshake() {
         assert_eq!(tunnel_parts("t", 1, &[]).len(), 1);
+    }
+
+    #[test]
+    fn the_error_of_a_failed_stop_does_not_hold_the_token() {
+        let token = "0123456789abcdef-secret-token";
+        let e = stop_error(token, bee_rpc::Error::Transport("down".into()));
+        let text = e.to_string();
+        assert!(!text.contains(token) && !text.contains("secret"), "{text}");
+        assert!(text.contains(&crate::instance::token_tag(token)), "{text}");
+        assert!(text.contains("may still be running"));
     }
 
     #[test]
