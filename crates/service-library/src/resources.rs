@@ -2,19 +2,21 @@
 //!
 //! This is the Rust version of the `ResourceManager` of `celaut-service-libraries`. A service
 //! that works on big data locks the memory that a job needs before it allocates it
-//! ([`ResourceManager::lock`]). If the pool has no room, the manager asks the node for the
-//! memory that is locked plus all that waits (`ModifyServiceSystemResources`) and the job
-//! goes on when the node has given it; when the last waiter is served and memory is
-//! unlocked, the manager asks for what is still locked, but never for less than the limit that the
-//! node gave at the start (the service uses memory that no lock counts, and a limit of 0 hibernates
-//! the instance in nodo), so the service does not pay for
-//! memory that it does not use. The node charges a fee per request: the manager does not
-//! ask twice in a row for the same amount.
+//! ([`ResourceManager::lock`]). That memory is room for jobs on top of `base`, the memory that
+//! the service needs by itself. If the room is too small, the manager asks the node for `base`
+//! plus the memory that is locked plus all that waits (`ModifyServiceSystemResources`) and the
+//! job goes on when the node has given it; when the last waiter is served and memory is
+//! unlocked, the manager asks for `base` plus what is still locked, so the service does not
+//! pay for room that it does not use. It never asks for less than `base`: a limit of 0 is,
+//! for nodo, a request to hibernate the instance, and a service that wants that asks for it
+//! with [`ResourceManager::hibernate`]. The node charges a fee per request: the manager does
+//! not ask twice in a row for the same amount.
 //!
 //! Differences with the Python version: a waiter is woken when memory is unlocked, and does
 //! not poll every second; a lock can have a time limit ([`ResourceManager::lock_for`]) or
 //! not wait at all ([`ResourceManager::try_lock`]); a failed request of the node is an
-//! error of the lock, and not a hang.
+//! error of the lock, and not a hang; the memory of the service itself is not room for jobs,
+//! and the pool never goes under it.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -64,11 +66,11 @@ impl Resizer for Gateway {
 /// The numbers of the manager at one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
-    /// The memory that the service may use, in bytes.
+    /// The memory limit of the service now, in bytes: `base` plus the room for jobs.
     pub pool: u64,
     /// The memory that is locked.
     pub locked: u64,
-    /// The pool minus what is locked.
+    /// The room for jobs that is not locked: the pool minus `base` minus what is locked.
     pub available: u64,
     /// The memory that waits for a lock.
     pub waiting: u64,
@@ -77,10 +79,10 @@ pub struct Stats {
 }
 
 struct State {
-    /// The memory limit that the node gave the service at the start: the manager never asks
-    /// for less. The service itself uses memory that no lock counts, and a limit of 0 is,
-    /// for nodo, a request to hibernate the instance.
+    /// The memory that the service needs by itself, with no job: the limit that the node gave
+    /// it at the start. It is not room for locks, and the manager never asks for less.
     base: u64,
+    /// The memory limit in force: `base` plus the room for jobs.
     pool: u64,
     locked: u64,
     last_request: Option<u64>,
@@ -89,7 +91,14 @@ struct State {
 
 impl State {
     fn available(&self) -> u64 {
-        self.pool.saturating_sub(self.locked)
+        self.pool
+            .saturating_sub(self.base)
+            .saturating_sub(self.locked)
+    }
+
+    /// The limit that holds what is locked and waits: `base` plus the jobs.
+    fn limit_for(&self, jobs: u64) -> u64 {
+        self.base.saturating_add(jobs)
     }
 }
 
@@ -102,17 +111,18 @@ pub struct ResourceManager<R: Resizer> {
 }
 
 impl<R: Resizer> ResourceManager<R> {
-    /// A manager whose pool is `pool` bytes: the `mem_limit` that the node gave the
-    /// service (`NodeConfig`'s initial resources).
-    pub fn new(resizer: R, pool: u64) -> Arc<Self> {
+    /// A manager for a service that needs `base` bytes by itself: the `mem_limit` that the
+    /// node gave it at the start (`NodeConfig`'s initial resources). Locks are room on top
+    /// of it, so the first lock asks the node for more.
+    pub fn new(resizer: R, base: u64) -> Arc<Self> {
         Arc::new(ResourceManager {
             resizer,
             state: AsyncMutex::new(State {
-                base: pool,
-                pool,
+                base,
+                pool: base,
                 locked: 0,
                 // The limit in force is the one that the node gave at the start.
-                last_request: Some(pool),
+                last_request: Some(base),
                 balance_mu: 0,
             }),
             waiting: Mutex::new(Vec::new()),
@@ -175,7 +185,7 @@ impl<R: Resizer> ResourceManager<R> {
             {
                 let mut state = self.state.lock().await;
                 if state.available() < len && self.waiting_sum() > state.available() {
-                    let request = state.locked.saturating_add(self.waiting_sum());
+                    let request = state.limit_for(state.locked.saturating_add(self.waiting_sum()));
                     self.update(&mut state, request).await?;
                 }
                 if state.available() >= len {
@@ -195,10 +205,9 @@ impl<R: Resizer> ResourceManager<R> {
         }
     }
 
-    /// Ask the node for `request` bytes, unless it is what is already in force. Never less
-    /// than the limit of the start, and never 0.
+    /// Ask the node for a limit of `request` bytes, unless it is what is already in force.
+    /// It is never 0, which hibernates: [`ResourceManager::hibernate`] is for that.
     async fn update(&self, state: &mut State, request: u64) -> Result<(), Error> {
-        let request = request.max(state.base);
         if request == 0 || state.last_request == Some(request) {
             return Ok(());
         }
@@ -209,11 +218,29 @@ impl<R: Resizer> ResourceManager<R> {
         Ok(())
     }
 
+    /// Hibernate the service: ask the node for a limit of 0, which for nodo stops the instance
+    /// until it is needed again. It is the one request that goes under `base`. It fails, and
+    /// asks nothing, while memory is locked or waits: those jobs would stop with the instance.
+    /// The next lock asks for the memory that it needs, as after any other request.
+    pub async fn hibernate(&self) -> Result<(), Error> {
+        let mut state = self.state.lock().await;
+        if state.locked > 0 || self.waiting_sum() > 0 {
+            return Err(Error::Resources(
+                "the service has jobs that hold or wait for memory: it cannot hibernate".into(),
+            ));
+        }
+        let resized = self.resizer.resize(0).await?;
+        state.last_request = Some(0);
+        state.pool = resized.mem_limit;
+        state.balance_mu = resized.balance_mu;
+        Ok(())
+    }
+
     async fn unlock(&self, len: u64) {
         let mut state = self.state.lock().await;
         state.locked = state.locked.saturating_sub(len);
         if self.waiting_sum() == 0 {
-            let request = state.locked;
+            let request = state.limit_for(state.locked);
             // A refusal to shrink leaves the pool as it was: nothing is lost but the saving.
             let _ = self.update(&mut state, request).await;
         }
@@ -351,27 +378,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lock_that_fits_asks_nothing_of_the_node() {
+    async fn a_lock_is_room_on_top_of_the_base_and_goes_back_to_it() {
         let node = FakeResizer::new(1000);
         let m = ResourceManager::new(node.clone(), 100);
         let lock = m.lock(60).await.unwrap();
-        assert_eq!(m.stats().await.available, 40);
-        assert!(node.requests().is_empty());
+        // The base is 100 and the job is 60 more.
+        assert_eq!(node.requests(), vec![160]);
+        let stats = m.stats().await;
+        assert_eq!((stats.pool, stats.locked, stats.available), (160, 60, 0));
         lock.release().await;
-        // 0 locked and nobody waits: the pool is back at the limit of the start, which is
-        // what the node has already. It is not asked, and it is never asked for 0.
-        assert!(node.requests().is_empty());
+        // Nothing is locked: the base, and never 0.
+        assert_eq!(node.requests(), vec![160, 100]);
+        assert_eq!(m.stats().await.pool, 100);
     }
 
     #[tokio::test]
-    async fn the_pool_never_shrinks_below_the_limit_of_the_start() {
-        let node = FakeResizer::new(1000);
+    async fn the_base_is_not_room_for_a_lock() {
+        // The node gives nothing above the base: no lock fits.
+        let node = FakeResizer::new(100);
         let m = ResourceManager::new(node.clone(), 100);
-        m.lock(10).await.unwrap().release().await;
-        m.lock(150).await.unwrap().release().await;
-        // 150 grows the pool, and the release goes back to 100, not to 0.
-        assert_eq!(node.requests(), vec![150, 100]);
-        assert_eq!(m.stats().await.pool, 100);
+        assert!(matches!(m.try_lock(1).await, Err(Error::Resources(_))));
+        assert_eq!(m.stats().await.available, 0);
     }
 
     #[tokio::test]
@@ -388,18 +415,16 @@ mod tests {
         let m = ResourceManager::new(node.clone(), 100);
         let a = m.lock(80).await.unwrap();
         let b = m.lock(120).await.unwrap();
-        // locked 80 + waiting 120.
-        assert_eq!(node.requests(), vec![200]);
+        // base 100 + locked 80 + waiting 120.
+        assert_eq!(node.requests(), vec![180, 300]);
         let stats = m.stats().await;
-        assert_eq!((stats.pool, stats.locked, stats.waiting), (200, 200, 0));
-        assert_eq!(stats.balance_mu, 999);
+        assert_eq!((stats.pool, stats.locked, stats.waiting), (300, 200, 0));
+        assert_eq!(stats.balance_mu, 998);
         b.release().await;
-        // 80 is under the limit of the start: back to 100.
-        assert_eq!(node.requests(), vec![200, 100]);
+        assert_eq!(node.requests(), vec![180, 300, 180]);
         a.release().await;
-        // Nothing is locked, and 100 is already in force.
-        assert_eq!(node.requests(), vec![200, 100]);
-        assert_eq!(m.stats().await.balance_mu, 998);
+        assert_eq!(node.requests(), vec![180, 300, 180, 100]);
+        assert_eq!(m.stats().await.balance_mu, 996);
     }
 
     #[tokio::test]
@@ -408,19 +433,32 @@ mod tests {
         let m = ResourceManager::new(node.clone(), 100);
         let _held = m.lock(50).await.unwrap();
         let mut other = m.lock(10).await.unwrap();
-        // Both unlocks leave 60 bytes locked, which is under the 100 in force: no request.
+        assert_eq!(node.requests(), vec![150, 160]);
+        // Both unlocks leave 60 bytes locked, which is the 160 in force: no request.
         other.unlock(0).await;
         other.unlock(0).await;
-        assert!(node.requests().is_empty());
-        let _more = m.lock(70).await.unwrap();
-        // 50 + 10 + 70 = 130 does not fit: one request, and the same amount is not asked twice.
-        assert_eq!(node.requests(), vec![130]);
+        assert_eq!(node.requests(), vec![150, 160]);
+    }
+
+    #[tokio::test]
+    async fn hibernate_asks_for_zero_only_when_nothing_is_locked() {
+        let node = FakeResizer::new(1000);
+        let m = ResourceManager::new(node.clone(), 100);
+        let lock = m.lock(10).await.unwrap();
+        assert!(matches!(m.hibernate().await, Err(Error::Resources(_))));
+        assert_eq!(node.requests(), vec![110]);
+        lock.release().await;
+        m.hibernate().await.unwrap();
+        assert_eq!(node.requests(), vec![110, 100, 0]);
+        // The service is awake again with the next lock: it asks for what it needs.
+        m.lock(10).await.unwrap().release().await;
+        assert_eq!(node.requests(), vec![110, 100, 0, 110, 100]);
     }
 
     #[tokio::test]
     async fn a_lock_waits_for_memory_that_another_lock_frees() {
-        // The node gives nothing above 100.
-        let node = FakeResizer::new(100);
+        // The node gives nothing above 170: 70 of room on top of the base of 100.
+        let node = FakeResizer::new(170);
         let m = ResourceManager::new(node.clone(), 100);
         let a = m.lock(70).await.unwrap();
         let waiter = tokio::spawn({
@@ -428,7 +466,7 @@ mod tests {
             async move { m.lock(60).await.unwrap().len() }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!waiter.is_finished(), "70 + 60 do not fit in 100");
+        assert!(!waiter.is_finished(), "70 + 60 do not fit in 70 of room");
         assert_eq!(m.stats().await.waiting, 60);
         a.release().await;
         assert_eq!(waiter.await.unwrap(), 60);
@@ -436,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_lock_does_not_wait_and_lock_for_gives_up() {
-        let node = FakeResizer::new(100);
+        let node = FakeResizer::new(170);
         let m = ResourceManager::new(node.clone(), 100);
         let _a = m.lock(70).await.unwrap();
         assert!(matches!(m.try_lock(60).await, Err(Error::Resources(_))));
