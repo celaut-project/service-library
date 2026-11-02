@@ -10,6 +10,11 @@ service reads from it where its gateway is. Use the `service-library` crate for 
 (`NodeConfig::load`, `Gateway::new`, `DependencyManager`). The wire details come from
 `celaut.proto` in `crates/celaut-proto/protos/` (synced from nodo; see `SOURCE`).
 
+A service that is not written in Rust uses the `celaut` command instead (the release binary
+`celaut-linux-<arch>`, see the README): the same pool, with the instances kept in a file
+between commands and the tokens out of reach of the service. `celaut acquire`, `release`,
+`maintain` and `shutdown` are the pool; everything below applies to it too.
+
 ## What matters to a service
 
 **Identity and credentials.** A service is an *instance* of its node. It sends no `Client`:

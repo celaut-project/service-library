@@ -1,0 +1,27 @@
+[package]
+name = "celaut-cli"
+description = "service-library as a command: `celaut`, so a Celaut service in any language can talk to its node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "celaut"
+path = "src/main.rs"
+
+[dependencies]
+service-library = { path = "../service-library" }
+celaut-proto = { workspace = true }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+# One thread: a command does one thing and ends.
+tokio = { version = "1.53", features = ["rt", "macros", "io-std", "io-util", "time", "net"] }
+
+[dev-dependencies]
+bee-rpc = { workspace = true }
+tonic = { version = "0.14", default-features = false, features = ["transport", "server"] }
+tonic-prost = { version = "0.14", default-features = false }
+tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "process", "sync"] }

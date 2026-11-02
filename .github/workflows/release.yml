@@ -1,0 +1,72 @@
+name: release
+
+# A tag v* publishes `celaut`, a static binary for each architecture that a node runs, so a
+# service in any language can copy it into its image. A manual run only builds them.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # The names are the `architecture` of service.json.
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      # The toolchain is the one of rust-toolchain.toml; ring compiles C, with musl-gcc.
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        env:
+          CC: musl-gcc
+        run: cargo build --release --locked -p celaut-cli --target ${{ matrix.target }}
+      - name: Check that it is static and runs
+        run: |
+          bin=target/${{ matrix.target }}/release/celaut
+          file "$bin"
+          file "$bin" | grep -q 'statically linked'
+          "$bin" --help > /dev/null
+      - name: Name it
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/celaut dist/celaut-linux-${{ matrix.arch }}
+          (cd dist && sha256sum celaut-linux-${{ matrix.arch }} > celaut-linux-${{ matrix.arch }}.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: celaut-linux-${{ matrix.arch }}
+          path: dist/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
