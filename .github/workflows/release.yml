@@ -42,7 +42,7 @@ jobs:
         run: |
           bin=target/${{ matrix.target }}/release/celaut
           file "$bin"
-          file "$bin" | grep -q 'statically linked'
+          file "$bin" | grep -qE 'statically linked|static-pie linked'
           "$bin" --help > /dev/null
       - name: Name it
         run: |
