@@ -1,1 +1,3 @@
 target
+target-musl/
+e2e/stage/

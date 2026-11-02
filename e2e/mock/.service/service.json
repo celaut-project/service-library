@@ -1,0 +1,10 @@
+{
+    "tag": "service-library-mock",
+    "architecture": "linux/arm64",
+    "resources": {
+        "at_init": {"mem_limit": 67108864},
+        "at_most": {"mem_limit": 134217728}
+    },
+    "init": {"entry_path": ["start.sh"]},
+    "api": [{"port": 8080, "transport": "tcp", "protocol": ["http"]}]
+}

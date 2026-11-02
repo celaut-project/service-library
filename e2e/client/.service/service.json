@@ -1,0 +1,11 @@
+{
+    "tag": "service-library-e2e-client",
+    "architecture": "linux/arm64",
+    "resources": {
+        "at_init": {"mem_limit": 134217728},
+        "at_most": {"mem_limit": 268435456}
+    },
+    "init": {"entry_path": ["e2e-client"]},
+    "config_declaration": {"path": ["__config__"]},
+    "api": []
+}

@@ -1,0 +1,13 @@
+[package]
+name = "e2e-client"
+description = "A service that starts the mock service as a dependency, to try service-library against a real node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+service-library = { path = "../service-library" }
+celaut-proto = { workspace = true }
+tokio = { version = "1.53", features = ["rt-multi-thread", "time", "io-util", "net", "macros"] }
+hex = "0.4"

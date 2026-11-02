@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/celaut-proto", "crates/service-library"]
+members = ["crates/celaut-proto", "crates/service-library", "crates/e2e-client"]
 
 [workspace.package]
 version = "0.1.0"
