@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "celaut-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bee-rpc",
  "celaut-proto",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "celaut-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
 ]
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "e2e-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "celaut-proto",
  "hex",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "service-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bee-rpc",
  "blake2",
