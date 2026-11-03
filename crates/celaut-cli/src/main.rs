@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use service_library::config::{grpc_uri, NodeConfig, DEFAULT_CONFIG_PATH};
 use service_library::gateway::{amount, Gateway, Node};
 use service_library::manager::tcp_is_alive;
+use service_library::network;
 use service_library::observe::ObserveOptions;
 use service_library::package::{self, PackageInfo};
 use service_library::resources::Resizer;
@@ -47,6 +48,9 @@ Commands:
   observe   <lease> [--packets] [--receipts]
                                the events of the instance, one JSON per line
   resize    --mem BYTES        ask the node for a memory limit for this service
+  resolve   --tag T... [--formal K=V]... [--protocol P]... [--prose TEXT]
+                               the members of a network: {tags, peers}. The node also
+                               opens their addresses in your firewall (a grant)
   chat      --client-id ID [--conversation C] <text>
                                a message to the operator of the node
 
@@ -446,6 +450,28 @@ impl Context {
     }
 }
 
+/// The members of a network with all their ports, so the caller picks the port of the
+/// protocol it needs.
+fn members(instances: &[celaut_proto::celaut::Instance]) -> Vec<Value> {
+    instances
+        .iter()
+        .map(|i| {
+            let slots: Vec<Value> = network::slots(i)
+                .into_iter()
+                .map(|s| {
+                    json!({
+                        "internal_port": s.internal_port,
+                        "transport": s.transport,
+                        "protocol_stack": s.protocol_stack,
+                        "uris": s.uris,
+                    })
+                })
+                .collect();
+            json!({ "slots": slots })
+        })
+        .collect()
+}
+
 fn mu(a: Option<&Amount>) -> Res<String> {
     Ok(amount(a)?.to_string())
 }
@@ -476,7 +502,11 @@ async fn run(args: Args) -> Res<Value> {
                         .iter()
                         .filter_map(|i| grpc_uri(i).ok())
                         .collect();
-                    json!({ "tags": n.tags, "peers": peers })
+                    json!({
+                        "tags": n.tags,
+                        "peers": peers,
+                        "members": members(&n.peer_instances),
+                    })
                 })
                 .collect();
             Ok(json!({
@@ -694,6 +724,31 @@ async fn run(args: Args) -> Res<Value> {
             Ok(json!({
                 "mem_limit": resized.mem_limit,
                 "balance_mu": resized.balance_mu.to_string(),
+            }))
+        }
+        "resolve" => {
+            let tags: Vec<&str> = args.values("tag").collect();
+            if tags.is_empty() {
+                return Err(usage("resolve needs --tag"));
+            }
+            let mut pairs = Vec::new();
+            for pair in args.values("formal") {
+                pairs.push(
+                    pair.split_once('=')
+                        .ok_or_else(|| usage(format!("--formal {pair:?} is not K=V")))?,
+                );
+            }
+            let protocols: Vec<&str> = args.values("protocol").collect();
+            let request = network::request(
+                &tags,
+                args.value("prose").unwrap_or_default(),
+                &pairs,
+                &protocols,
+            )?;
+            let resolved = ctx.gateway()?.resolve_network(request).await?;
+            Ok(json!({
+                "tags": resolved.tags,
+                "peers": members(&resolved.peer_instances),
             }))
         }
         "chat" => {

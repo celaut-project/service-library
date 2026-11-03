@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bee_rpc::buffer::Buffer;
-use bee_rpc::frame::{serialize_part, Part};
+use bee_rpc::frame::{serialize_part, ParseOptions, Parser, Part};
 use celaut_proto::celaut::instance::{Uri, UriSlot};
 use celaut_proto::celaut::service::{api::Slot, Api};
 use celaut_proto::celaut::{
-    Amount, ConfigurationFile, Instance, Metrics, Refund, ServiceInstance, Sysresources,
+    configuration_file::NetworkResolution, service::Network, Amount, ConfigurationFile, Instance,
+    Metrics, Refund, ServiceInstance, Sysresources,
 };
 use prost::Message;
 use serde_json::Value;
@@ -74,8 +75,55 @@ impl tonic::server::StreamingService<Buffer> for Method {
         let mut request = request.into_inner();
         tokio::spawn(async move {
             // The first piece of the request is enough to answer.
-            let _ = request.message().await;
+            let first = request.message().await;
             let answer = match path.as_str() {
+                "/celaut.Gateway/ResolveNetwork" => {
+                    let mut parser = Parser::new(ParseOptions::accepting([1]));
+                    let part = parser
+                        .push(first.unwrap().unwrap())
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap();
+                    let network = Network::decode(part.data.as_slice()).unwrap();
+                    // The node declared db.engine=postgresql, and refuses the rest.
+                    let body = String::from_utf8(network.formal.clone()).unwrap();
+                    if !body.lines().any(|l| l == "db.engine=postgresql") {
+                        let _ = tx
+                            .send(Err(Status::permission_denied("a fixed key changed")))
+                            .await;
+                        return;
+                    }
+                    // A member with no gRPC port: postgresql, and a second port.
+                    let mut member = instance("10.0.0.9", 5432);
+                    let proto = |t: &str| celaut_proto::celaut::service::api::Protocol {
+                        tags: vec![t.into()],
+                        ..Default::default()
+                    };
+                    // Only 5432 is declared: 9187 has no protocol, and is not guessed.
+                    member.api = Some(Api {
+                        slot: vec![Slot {
+                            port: 5432,
+                            transport: Some(proto("tcp")),
+                            protocol_stack: vec![proto("postgresql")],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    });
+                    member.uri_slot[0].internal_port = 5432;
+                    member.uri_slot.push(UriSlot {
+                        internal_port: 9187,
+                        uri: vec![Uri {
+                            ip: "10.0.0.9".into(),
+                            port: 9187,
+                        }],
+                    });
+                    NetworkResolution {
+                        tags: network.tags,
+                        peer_instances: vec![member],
+                    }
+                    .encode_to_vec()
+                }
                 "/celaut.Gateway/StartService" => {
                     let n = counts.started.fetch_add(1, Ordering::SeqCst);
                     ServiceInstance {
@@ -274,5 +322,110 @@ async fn bad_arguments_are_exit_code_2() {
     let (code, config) = celaut(&dir, &["config"]).await;
     assert_eq!(code, 0);
     assert_eq!(config["mem_limit"], 1 << 20);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_gives_every_slot_of_a_member_with_its_internal_port() {
+    let (_, dir) = node().await;
+    let (code, out) = celaut(
+        &dir,
+        &[
+            "resolve",
+            "--tag",
+            "postgres:personal-nutrition",
+            "--formal",
+            "db.schema=personal-nutrition",
+            "--formal",
+            "db.engine=postgresql",
+            "--formal",
+            "db.cluster=abc",
+            "--protocol",
+            "postgresql",
+        ],
+    )
+    .await;
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["tags"][0], "postgres:personal-nutrition");
+    let slots = &out["peers"][0]["slots"];
+    assert_eq!(slots[0]["internal_port"], 5432);
+    assert_eq!(slots[0]["uris"][0], "10.0.0.9:5432");
+    assert_eq!(slots[0]["transport"][0], "tcp");
+    assert_eq!(slots[0]["protocol_stack"][0][0], "postgresql");
+    assert_eq!(slots[1]["internal_port"], 9187);
+    assert!(slots[1]["protocol_stack"].as_array().unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_refuses_an_unfilled_variable_before_the_node_and_a_changed_key_at_the_node() {
+    let (_, dir) = node().await;
+    let (code, error) = celaut(
+        &dir,
+        &[
+            "resolve",
+            "--tag",
+            "t",
+            "--formal",
+            "db.cluster=${NUTRITION_DB_CLUSTER}",
+        ],
+    )
+    .await;
+    assert_eq!(code, 1, "{error}");
+    assert!(
+        error["error"].as_str().unwrap().contains("variable"),
+        "{error}"
+    );
+
+    let (code, error) = celaut(
+        &dir,
+        &["resolve", "--tag", "t", "--formal", "db.engine=mysql"],
+    )
+    .await;
+    assert_eq!(code, 1, "{error}");
+    assert_eq!(error["unreachable"], false);
+
+    let (code, error) = celaut(&dir, &["resolve", "--formal", "a=b"]).await;
+    assert_eq!(code, 2, "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_with_no_node_is_exit_code_3() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = dir_for(port);
+    let (code, error) = celaut(&dir, &["resolve", "--tag", "t"]).await;
+    assert_eq!(code, 3, "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_keeps_every_slot_of_a_member_that_has_no_grpc_port() {
+    let dir = dir_for(1);
+    let mut file =
+        ConfigurationFile::decode(std::fs::read(dir.join("__config__")).unwrap().as_slice())
+            .unwrap();
+    // A postgresql member: no gRPC slot, so `peers` drops it, and `members` keeps it.
+    let mut member = instance("10.0.0.9", 5432);
+    member.api = None;
+    member.uri_slot[0].internal_port = 5432;
+    file.network_resolution = vec![NetworkResolution {
+        tags: vec!["postgres:x".into()],
+        peer_instances: vec![member],
+    }];
+    std::fs::write(dir.join("__config__"), file.encode_to_vec()).unwrap();
+    let (code, config) = celaut(&dir, &["config"]).await;
+    assert_eq!(code, 0, "{config}");
+    let network = &config["networks"][0];
+    assert_eq!(network["peers"].as_array().unwrap().len(), 0);
+    assert_eq!(network["members"][0]["slots"][0]["internal_port"], 5432);
+    assert_eq!(
+        network["members"][0]["slots"][0]["uris"][0],
+        "10.0.0.9:5432"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

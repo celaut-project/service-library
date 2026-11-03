@@ -93,6 +93,19 @@ observation that cannot start is one notice that says why. `Gateway::chat` sends
 message to the operator of a node, with the `client_id` of this service on that node (the node
 must have it bound to a peer).
 
+**Networks.** `network_resolution` has only what the node resolved at the start. A network that
+was deferred (a `${VAR}` was not set), or a later look at the members of a domain, is
+`Gateway::resolve_network` (CLI: `celaut resolve --tag T --formal K=V ... [--protocol P]`;
+`config` also gives `networks[].members`). Build the request with `network::request`: the
+`formal` body is the `key=value` lines sorted by key, joined with `\n`, and the node compares it
+byte for byte with your declaration (fixed keys unchanged, `${VAR}` filled, keys may be added).
+A value that is still `${...}` is refused before the call. **The call is a grant**: if the
+request fits, the node opens the returned addresses in your firewall. The answer keeps every
+slot with its `internal_port`, its `transport` and its `protocol_stack` as the member declares
+them (`network::slots`). Pick the slot by protocol, never by port number: nobody agrees on
+ports. A port that the member does not declare has no protocol, and it is not guessed. A
+refusal is exit code 1, a node that does not answer is 3.
+
 **Not your concern.** Choosing between nodes, and balancing the load, belong to the node of the
 service and to clients. A service talks to one gateway.
 

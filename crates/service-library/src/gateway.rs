@@ -10,7 +10,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use bee_rpc::frame::{ParseOptions, Part};
+use celaut_proto::celaut::configuration_file::NetworkResolution;
 use celaut_proto::celaut::metadata::hash_tag::Hash;
+use celaut_proto::celaut::service::Network;
 use celaut_proto::celaut::{
     Amount, ChatAck, ChatMessage, Client, Configuration, EstimatedCost, Metrics,
     ModifyDepositInput, ModifyDepositOutput, ModifyServiceSystemResourcesInput,
@@ -165,6 +167,36 @@ impl Gateway {
             Some(part) => decode(part, "ModifyDepositOutput"),
             // A false bool and an empty text have no bytes.
             None => Ok(ModifyDepositOutput::default()),
+        }
+    }
+
+    /// `ResolveNetwork`: ask the node for the members of `network` that it can find. Build the
+    /// request with [`crate::network::request`]. A service sends no `Client`: the node knows
+    /// the caller by its address.
+    ///
+    /// The node checks the request against the networks that this service declared (a fixed
+    /// key unchanged, a `${VAR}` filled, keys added). If it fits, the call is **a grant**:
+    /// the node also opens the returned addresses in the firewall of this service. The
+    /// answer is what the node believes, not a proof. The node does not ask other nodes for
+    /// a network that is not `pow:` (nodo#619), so the list can grow later.
+    ///
+    /// The node refuses a network that its policy does not allow, one that does not fit the
+    /// declaration, and one with an unfilled `${VAR}`: that is an [`Error::Gateway`] with
+    /// `unreachable: false`. The `tag` `*` gives no peers.
+    pub async fn resolve_network(&self, network: Network) -> Result<NetworkResolution, Error> {
+        let answer = self
+            .call(
+                "ResolveNetwork",
+                vec![Part::new(1, network.encode_to_vec())],
+                &[1],
+                CALL_TIMEOUT,
+            )
+            .await
+            .map_err(|e| Self::failed("resolving a network", 1, e))?;
+        match answer.iter().find(|p| p.index == 1) {
+            Some(part) => decode(part, "NetworkResolution"),
+            // A network with no tags and no peers has no bytes.
+            None => Ok(NetworkResolution::default()),
         }
     }
 

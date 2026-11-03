@@ -17,6 +17,7 @@ pub mod error;
 pub mod gateway;
 pub mod instance;
 pub mod manager;
+pub mod network;
 pub mod observe;
 pub mod package;
 pub mod receipt;
