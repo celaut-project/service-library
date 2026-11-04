@@ -109,9 +109,11 @@ async fn serve(mode: Mode, bee: Vec<u8>) -> String {
                     let id = hex::encode(ID);
                     match mode {
                         Mode::Good => reply("200 OK", &format!("X-Service-Id: {id}\r\n"), &bee),
-                        Mode::WrongId => {
-                            reply("200 OK", &format!("X-Service-Id: {}\r\n", "08".repeat(32)), &bee)
-                        }
+                        Mode::WrongId => reply(
+                            "200 OK",
+                            &format!("X-Service-Id: {}\r\n", "08".repeat(32)),
+                            &bee,
+                        ),
                         Mode::Chunked => {
                             let mut out = format!(
                                 "HTTP/1.1 200 OK\r\nX-Service-Id: {id}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
@@ -125,7 +127,9 @@ async fn serve(mode: Mode, bee: Vec<u8>) -> String {
                             out.extend_from_slice(b"0\r\n\r\n");
                             out
                         }
-                        Mode::Status(code, text) => reply(&format!("{code} X"), "", text.as_bytes()),
+                        Mode::Status(code, text) => {
+                            reply(&format!("{code} X"), "", text.as_bytes())
+                        }
                     }
                 } else {
                     reply("404 Not Found", "", b"")
@@ -145,7 +149,10 @@ async fn health_and_a_good_pack() {
     let packer = Packer::new(&format!("http://{}/", serve(Mode::Good, bee.clone()).await));
     packer.health().await.unwrap();
     std::fs::write(d.join("p.zip"), b"PK-zip").unwrap();
-    let packed = packer.pack(&d.join("p.zip"), &d.join("out.celaut.bee")).await.unwrap();
+    let packed = packer
+        .pack(&d.join("p.zip"), &d.join("out.celaut.bee"))
+        .await
+        .unwrap();
     assert_eq!(packed.service_id, hex::encode(ID));
     assert_eq!(packed.size, bee.len() as u64);
     assert_eq!(std::fs::read(&packed.path).unwrap(), bee);
@@ -158,7 +165,10 @@ async fn a_chunked_answer_is_the_same_file() {
     let bee = bee_bytes(&d);
     let packer = Packer::new(&serve(Mode::Chunked, bee.clone()).await);
     std::fs::write(d.join("p.zip"), b"PK-zip").unwrap();
-    let packed = packer.pack(&d.join("p.zip"), &d.join("out.bee")).await.unwrap();
+    let packed = packer
+        .pack(&d.join("p.zip"), &d.join("out.bee"))
+        .await
+        .unwrap();
     assert_eq!(std::fs::read(&packed.path).unwrap(), bee);
 }
 
@@ -168,7 +178,10 @@ async fn an_id_that_the_file_does_not_name_leaves_no_file() {
     let bee = bee_bytes(&d);
     let packer = Packer::new(&serve(Mode::WrongId, bee).await);
     std::fs::write(d.join("p.zip"), b"PK-zip").unwrap();
-    let error = packer.pack(&d.join("p.zip"), &d.join("out.bee")).await.unwrap_err();
+    let error = packer
+        .pack(&d.join("p.zip"), &d.join("out.bee"))
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("the packer said"), "{error}");
     assert!(!d.join("out.bee").exists());
     assert!(!d.join("out.bee.part").exists());
@@ -179,10 +192,19 @@ async fn the_errors_of_the_packer_keep_their_status_and_text() {
     let d = dir("errors");
     let bee = bee_bytes(&d);
     std::fs::write(d.join("p.zip"), b"PK-zip").unwrap();
-    for (code, text) in [(400, "1. no Dockerfile"), (415, "not a zip"), (413, "too large")] {
+    for (code, text) in [
+        (400, "1. no Dockerfile"),
+        (415, "not a zip"),
+        (413, "too large"),
+    ] {
         let packer = Packer::new(&serve(Mode::Status(code, text), bee.clone()).await);
         match packer.pack(&d.join("p.zip"), &d.join("out.bee")).await {
-            Err(Error::Packer { status, message, unreachable, .. }) => {
+            Err(Error::Packer {
+                status,
+                message,
+                unreachable,
+                ..
+            }) => {
                 assert_eq!(status, Some(code));
                 assert_eq!(message, text);
                 assert!(!unreachable);
@@ -211,5 +233,8 @@ async fn the_registry_of_the_packer() {
     assert!(!packer.has_dependency(&"09".repeat(32)).await.unwrap());
     assert!(packer.has_dependency("../etc").await.is_err());
     std::fs::write(d.join("dep.tgz"), b"gz").unwrap();
-    packer.upload_dependency(&hex::encode(ID), &d.join("dep.tgz")).await.unwrap();
+    packer
+        .upload_dependency(&hex::encode(ID), &d.join("dep.tgz"))
+        .await
+        .unwrap();
 }

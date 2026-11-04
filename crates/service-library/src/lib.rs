@@ -24,8 +24,8 @@ pub mod packer;
 pub mod receipt;
 pub mod relay;
 pub mod resources;
-pub mod skips;
 pub mod skills;
+pub mod skips;
 pub mod tunnel;
 
 pub use error::Error;

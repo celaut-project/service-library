@@ -13,13 +13,13 @@ use std::time::Duration;
 use celaut_proto::celaut::{Amount, BytesKeyValue, Configuration, ServiceInstance as Started};
 use prost::Message;
 use serde_json::{json, Value};
-use service_library::packer::Packer;
 use service_library::config::{grpc_uri, NodeConfig, DEFAULT_CONFIG_PATH};
 use service_library::gateway::{amount, Gateway, Node};
 use service_library::manager::tcp_is_alive;
 use service_library::network;
 use service_library::observe::ObserveOptions;
 use service_library::package::{self, PackageInfo};
+use service_library::packer::Packer;
 use service_library::resources::Resizer;
 use service_library::skills::Skills;
 use service_library::Error;
@@ -541,8 +541,13 @@ async fn run(args: Args) -> Res<Value> {
                 Some(uri) => uri.to_string(),
                 None => {
                     let lease = args.lease()?;
-                    ctx.pool(|p| p.instances.iter().find(|i| i.id == lease).map(|i| i.uri.clone()))?
-                        .ok_or_else(|| Fail::Other(format!("no lease {lease}")))?
+                    ctx.pool(|p| {
+                        p.instances
+                            .iter()
+                            .find(|i| i.id == lease)
+                            .map(|i| i.uri.clone())
+                    })?
+                    .ok_or_else(|| Fail::Other(format!("no lease {lease}")))?
                 }
             };
             let packer = Packer::new(&uri);
@@ -573,11 +578,15 @@ async fn run(args: Args) -> Res<Value> {
                 "skills" => Ok(serde_json::to_value(skills.load_skills().await?)
                     .map_err(|e| Fail::Other(e.to_string()))?),
                 "skill" => Ok(serde_json::to_value(
-                    skills.load_skill_tree(args.word(1, "the box id of the skill")?).await?,
+                    skills
+                        .load_skill_tree(args.word(1, "the box id of the skill")?)
+                        .await?,
                 )
                 .map_err(|e| Fail::Other(e.to_string()))?),
                 "covering" => Ok(serde_json::to_value(
-                    skills.load_coverages(args.word(1, "the box id of the skill")?).await?,
+                    skills
+                        .load_coverages(args.word(1, "the box id of the skill")?)
+                        .await?,
                 )
                 .map_err(|e| Fail::Other(e.to_string()))?),
                 _ => {

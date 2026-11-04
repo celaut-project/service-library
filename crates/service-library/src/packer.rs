@@ -73,7 +73,14 @@ impl Packer {
     /// that the instance does not answer yet.
     pub async fn health(&self) -> Result<(), Error> {
         let answer = self
-            .request("GET /health", "GET", "/health", None, None, Some(SHORT_TIMEOUT))
+            .request(
+                "GET /health",
+                "GET",
+                "/health",
+                None,
+                None,
+                Some(SHORT_TIMEOUT),
+            )
             .await?;
         answer.ok("GET /health")
     }
@@ -147,7 +154,14 @@ impl Packer {
         let id = checked_id(service_id)?;
         let operation = format!("GET /registry/{id}");
         let answer = self
-            .request(&operation, "GET", &format!("/registry/{id}"), None, None, Some(SHORT_TIMEOUT))
+            .request(
+                &operation,
+                "GET",
+                &format!("/registry/{id}"),
+                None,
+                None,
+                Some(SHORT_TIMEOUT),
+            )
             .await?;
         match answer.status {
             404 => Ok(false),
@@ -213,7 +227,10 @@ impl Packer {
             .map_err(|e| unreachable(operation, e.to_string()))?;
         let (read, mut write) = stream.into_split();
 
-        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", self.uri);
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+            self.uri
+        );
         let mut file = None;
         if let Some((content_type, source)) = body {
             let f = File::open(source)
@@ -224,7 +241,9 @@ impl Packer {
                 .await
                 .map_err(|e| failed(operation, format!("{}: {e}", source.display())))?
                 .len();
-            head.push_str(&format!("Content-Type: {content_type}\r\nContent-Length: {length}\r\n"));
+            head.push_str(&format!(
+                "Content-Type: {content_type}\r\nContent-Length: {length}\r\n"
+            ));
             file = Some(f);
         } else if method == "POST" {
             head.push_str("Content-Length: 0\r\n");
@@ -268,7 +287,10 @@ impl Packer {
 
 /// The path that a package is written to before it is complete.
 fn partial(out: &Path) -> PathBuf {
-    let mut name = out.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(".part");
     out.with_file_name(name)
 }
@@ -279,7 +301,9 @@ fn checked_id(id: &str) -> Result<String, Error> {
     if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(id)
     } else {
-        Err(Error::Protocol(format!("{id:?} is not a service id (64 hex digits)")))
+        Err(Error::Protocol(format!(
+            "{id:?} is not a service id (64 hex digits)"
+        )))
     }
 }
 
@@ -375,8 +399,14 @@ async fn read_answer<R: AsyncBufReadExt + Unpin>(
             headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
-    let find = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-    let chunked = find("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let find = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let chunked =
+        find("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     let length = find("content-length").and_then(|v| v.parse::<u64>().ok());
 
     let mut out: Option<File> = None;
@@ -390,11 +420,7 @@ async fn read_answer<R: AsyncBufReadExt + Unpin>(
         }
     }
     let mut small = Vec::new();
-    async fn emit(
-        out: &mut Option<File>,
-        small: &mut Vec<u8>,
-        data: &[u8],
-    ) -> Result<(), Read> {
+    async fn emit(out: &mut Option<File>, small: &mut Vec<u8>, data: &[u8]) -> Result<(), Read> {
         match out {
             Some(file) => file.write_all(data).await?,
             None => {
@@ -440,7 +466,9 @@ async fn read_answer<R: AsyncBufReadExt + Unpin>(
             let n = reader.read(&mut buf[..want]).await?;
             if n == 0 {
                 if left.is_some() {
-                    return Err(Read::Io("the connection closed before the end of the body".into()));
+                    return Err(Read::Io(
+                        "the connection closed before the end of the body".into(),
+                    ));
                 }
                 break;
             }

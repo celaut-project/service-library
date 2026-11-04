@@ -31,10 +31,9 @@ fn registry(r4: &str, r5: Option<&str>) -> Vec<Value> {
             json!({"name": "Sat-sorter", "prose": "sort sats", "tags": ["utxo"],
                    "extended_skill_boxes": [], "profile_id": "pp"}),
         )],
-        (t, Some(SKILL)) if t == COVERAGE_TYPE_ID => vec![explorer_box(
-            "c1",
-            json!({"service_id": SVC_A}),
-        )],
+        (t, Some(SKILL)) if t == COVERAGE_TYPE_ID => {
+            vec![explorer_box("c1", json!({"service_id": SVC_A}))]
+        }
         (t, Some(SKILL)) if t == BENCHMARK_TYPE_ID => vec![explorer_box(
             BENCH,
             json!({"name": "12 months",
@@ -58,7 +57,10 @@ fn registry(r4: &str, r5: Option<&str>) -> Vec<Value> {
 async fn serve(
     chunked: bool,
     fail: Option<u16>,
-) -> (String, tokio::sync::mpsc::UnboundedReceiver<(String, Value)>) {
+) -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let uri = format!("http://{}/explorer", listener.local_addr().unwrap());
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -74,7 +76,11 @@ async fn serve(
                     let head = String::from_utf8_lossy(&raw[..end]).to_string();
                     let length: usize = head
                         .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
                         .unwrap_or(0);
                     if raw.len() >= end + 4 + length {
                         break (head, raw[end + 4..end + 4 + length].to_vec());
@@ -95,7 +101,10 @@ async fn serve(
                     .await;
                 continue;
             }
-            let r4 = request["registers"]["R4"].as_str().unwrap_or_default().to_string();
+            let r4 = request["registers"]["R4"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let r5 = request["registers"]["R5"].as_str().map(str::to_string);
             let items = registry(&r4, r5.as_deref());
             let payload = json!({"items": items, "total": items.len()}).to_string();
@@ -132,7 +141,10 @@ async fn the_skill_tree_is_what_the_registry_holds() {
 
     // The search: the prefix of the Explorer, the contract, the registers as hex.
     let (path, request) = seen.recv().await.unwrap();
-    assert_eq!(path, "POST /explorer/api/v1/boxes/unspent/search?offset=0&limit=100 HTTP/1.1");
+    assert_eq!(
+        path,
+        "POST /explorer/api/v1/boxes/unspent/search?offset=0&limit=100 HTTP/1.1"
+    );
     assert_eq!(request["registers"]["R4"], SKILL_TYPE_ID);
     assert!(request["registers"].get("R5").is_none());
     assert_eq!(request["ergoTreeTemplateHash"].as_str().unwrap().len(), 64);
@@ -140,14 +152,21 @@ async fn the_skill_tree_is_what_the_registry_holds() {
     let tree = skills.load_skill_tree(SKILL).await.unwrap();
     assert_eq!(tree.skill.unwrap().name, "Sat-sorter");
     // SVC_A is covered directly and by a result: once. SVC_B only by a result.
-    let services: Vec<_> = tree.coverages.iter().map(|c| c.service_id.clone().unwrap()).collect();
+    let services: Vec<_> = tree
+        .coverages
+        .iter()
+        .map(|c| c.service_id.clone().unwrap())
+        .collect();
     assert_eq!(services, [SVC_A, SVC_B]);
     assert_eq!(tree.coverages[0].box_id, "c1");
     assert_eq!(tree.coverages[1].box_id, "r2");
 
     let bench = &tree.benchmarks[0];
     assert_eq!(bench.benchmark.name, "12 months");
-    assert_eq!(bench.benchmark.performance_metrics[0].higher_is_better, Some(false));
+    assert_eq!(
+        bench.benchmark.performance_metrics[0].higher_is_better,
+        Some(false)
+    );
     assert_eq!(bench.results.len(), 2);
     assert_eq!(bench.results[0].data[0].metrics_values, [2.5]);
     assert_eq!(bench.results[0].timestamp, 5);
@@ -175,7 +194,17 @@ async fn ids_that_are_not_hex_find_nothing_and_ask_nothing() {
 async fn an_explorer_that_refuses_is_an_error_with_its_status() {
     let (uri, _seen) = serve(false, Some(400)).await;
     let error = Skills::new(&uri).unwrap().load_skills().await.unwrap_err();
-    assert!(matches!(error, Error::Registry { status: Some(400), unreachable: false, .. }), "{error}");
+    assert!(
+        matches!(
+            error,
+            Error::Registry {
+                status: Some(400),
+                unreachable: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
     assert!(!error.is_unreachable());
 }
 

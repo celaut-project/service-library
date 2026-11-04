@@ -40,8 +40,7 @@ pub const SKILL_TYPE_ID: &str = "ffce59c01b9c0c245005f9c2daf817607e912a3ececd5f6
 pub const BENCHMARK_TYPE_ID: &str =
     "f6480184daf3b7750a58e58319e12adc5266bd986eec0f57ac451c995a30f54d";
 /// The Type NFT of a result (`celaut:result:v1`).
-pub const RESULT_TYPE_ID: &str =
-    "49b26dc06b1680769477264d2e8e9bf561005236cde3097630bffcff631b7aef";
+pub const RESULT_TYPE_ID: &str = "49b26dc06b1680769477264d2e8e9bf561005236cde3097630bffcff631b7aef";
 /// The Type NFT of a coverage (`celaut:coverage:v1`).
 pub const COVERAGE_TYPE_ID: &str =
     "1da6799e935cbb0fb14d359f06f23854c3d1bd509508948cc01b7b018dbbbdf5";
@@ -440,7 +439,11 @@ impl Skills {
     /// publisher.
     pub async fn service_metadata(&self, service_id: &str) -> Result<Vec<ServiceMetadata>, Error> {
         let boxes = self
-            .boxes("service_metadata", SERVICE_METADATA_TYPE_ID, Some(service_id))
+            .boxes(
+                "service_metadata",
+                SERVICE_METADATA_TYPE_ID,
+                Some(service_id),
+            )
             .await?;
         Ok(boxes
             .iter()
@@ -608,7 +611,10 @@ impl Endpoint {
         let mut raw = Vec::new();
         // A server may close a TLS connection without the closing alert: the answer is
         // whole if it parses, so a read error ends the read and the parse decides.
-        let read = (&mut stream).take(MAX_BODY + MAX_HEAD as u64).read_to_end(&mut raw).await;
+        let read = (&mut stream)
+            .take(MAX_BODY + MAX_HEAD as u64)
+            .read_to_end(&mut raw)
+            .await;
         let answer = parse_answer(&raw);
         match (answer, read) {
             (Ok(answer), _) => {
@@ -616,7 +622,10 @@ impl Endpoint {
                     return Err(registry_failed(
                         operation,
                         Some(answer.status),
-                        String::from_utf8_lossy(&answer.body).chars().take(300).collect::<String>(),
+                        String::from_utf8_lossy(&answer.body)
+                            .chars()
+                            .take(300)
+                            .collect::<String>(),
                     ));
                 }
                 Ok(answer.body)
