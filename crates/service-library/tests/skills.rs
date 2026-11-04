@@ -163,13 +163,11 @@ async fn the_skill_tree_is_what_the_registry_holds() {
         .iter()
         .map(|c| c.service_id.clone().unwrap())
         .collect();
-    // The coverage about the benchmark comes after the direct ones and before the results.
-    assert_eq!(services, [SVC_A, SVC_C, SVC_B]);
+    // The service that runs the benchmark (SVC_C) does not solve the skill: it is not here.
+    assert_eq!(services, [SVC_A, SVC_B]);
     assert_eq!(tree.coverages[0].box_id, "c1");
-    assert_eq!(tree.coverages[0].benchmark_id, None);
-    assert_eq!(tree.coverages[1].box_id, "c2");
-    assert_eq!(tree.coverages[1].benchmark_id.as_deref(), Some(BENCH));
-    assert_eq!(tree.coverages[2].box_id, "r2");
+    assert_eq!(tree.coverages[1].box_id, "r2");
+    assert!(tree.coverages.iter().all(|c| c.benchmark_id.is_none()));
 
     let bench = &tree.benchmarks[0];
     assert_eq!(bench.benchmark.name, "12 months");
@@ -177,6 +175,10 @@ async fn the_skill_tree_is_what_the_registry_holds() {
         bench.benchmark.performance_metrics[0].higher_is_better,
         Some(false)
     );
+    // It is in the benchmark, as a runner.
+    assert_eq!(bench.coverages.len(), 1);
+    assert_eq!(bench.coverages[0].service_id.as_deref(), Some(SVC_C));
+    assert_eq!(bench.coverages[0].benchmark_id.as_deref(), Some(BENCH));
     assert_eq!(bench.results.len(), 2);
     assert_eq!(bench.results[0].data[0].metrics_values, [2.5]);
     assert_eq!(bench.results[0].timestamp, 5);

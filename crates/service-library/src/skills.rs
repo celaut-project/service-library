@@ -102,8 +102,8 @@ pub struct Coverage {
     /// The id of the service, in hex, which [`crate::manager::DependencyManager::add_service`]
     /// takes. A coverage from a result has it always.
     pub service_id: Option<String>,
-    /// The benchmark that the coverage points at, if it is about one benchmark of the skill
-    /// and not about the whole skill.
+    /// Set for a coverage of a benchmark (see [`Skills::load_benchmark_coverages`]); `None`
+    /// for a coverage of a skill.
     pub benchmark_id: Option<String>,
 }
 
@@ -169,6 +169,9 @@ pub struct BenchmarkTree {
     #[serde(flatten)]
     pub benchmark: Benchmark,
     pub results: Vec<Measure>,
+    /// The services that run this benchmark. They are not the ones that solve the skill: a
+    /// service with a result is a solution, and this is who can measure the others.
+    pub coverages: Vec<Coverage>,
 }
 
 /// A skill with the services that cover it and how they were measured.
@@ -346,8 +349,8 @@ impl Skills {
             .collect())
     }
 
-    /// The services that cover a skill: the coverages that point at it or at one of its
-    /// benchmarks, and the services that have a result in one of its benchmarks. A service is once, and a direct coverage wins.
+    /// The services that cover a skill: the coverages that point at it, and the services that
+    /// have a result in one of its benchmarks. A service is once, and a direct coverage wins.
     /// This is the call to start from when a service needs a capability.
     pub async fn load_coverages(&self, skill_box_id: &str) -> Result<Vec<Coverage>, Error> {
         let boxes = self
@@ -362,14 +365,9 @@ impl Skills {
                 benchmark_id: optional_text(&r9, "benchmark_id"),
             }
         };
-        let mut direct: Vec<Coverage> = boxes.iter().map(coverage).collect();
+        let direct: Vec<Coverage> = boxes.iter().map(coverage).collect();
         let mut results = Vec::new();
         for benchmark in self.load_benchmarks(skill_box_id).await? {
-            // A coverage may point at a benchmark of the skill instead of the skill.
-            let about_benchmark = self
-                .boxes("load_coverages", COVERAGE_TYPE_ID, Some(&benchmark.id))
-                .await?;
-            direct.extend(about_benchmark.iter().map(coverage));
             results.extend(self.load_results(&benchmark.id).await?);
         }
 
@@ -391,10 +389,45 @@ impl Skills {
                 box_id: result.id,
                 profile_id: result.profile_id,
                 service_id: Some(result.service_id),
-                benchmark_id: Some(result.benchmark_id),
+                benchmark_id: None,
             });
         }
         Ok(merged)
+    }
+
+    /// The services that run a benchmark: the coverages that point at it. A service with a
+    /// result in it is not one (it is a solution of the skill, and is in
+    /// [`Skills::load_coverages`]), and it is not derived here. The registry app makes the
+    /// same difference.
+    pub async fn load_benchmark_coverages(
+        &self,
+        benchmark_id: &str,
+    ) -> Result<Vec<Coverage>, Error> {
+        let boxes = self
+            .boxes(
+                "load_benchmark_coverages",
+                COVERAGE_TYPE_ID,
+                Some(benchmark_id),
+            )
+            .await?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(boxes
+            .iter()
+            .map(|b| {
+                let r9 = register9(b);
+                Coverage {
+                    box_id: text(b, "boxId"),
+                    profile_id: profile_id(b, &r9),
+                    service_id: optional_text(&r9, "service_id"),
+                    benchmark_id: Some(benchmark_id.to_string()),
+                }
+            })
+            .filter(|c| {
+                c.service_id
+                    .as_ref()
+                    .is_none_or(|id| seen.insert(id.clone()))
+            })
+            .collect())
     }
 
     /// A skill with its coverages, its benchmarks and the measures of each.
@@ -408,7 +441,12 @@ impl Skills {
         let mut benchmarks = Vec::new();
         for benchmark in self.load_benchmarks(skill_box_id).await? {
             let results = self.load_results(&benchmark.id).await?;
-            benchmarks.push(BenchmarkTree { benchmark, results });
+            let coverages = self.load_benchmark_coverages(&benchmark.id).await?;
+            benchmarks.push(BenchmarkTree {
+                benchmark,
+                results,
+                coverages,
+            });
         }
         Ok(SkillTree {
             skill,
