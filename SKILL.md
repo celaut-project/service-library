@@ -109,6 +109,48 @@ refusal is exit code 1, a node that does not answer is 3.
 **Not your concern.** Choosing between nodes, and balancing the load, belong to the node of the
 service and to clients. A service talks to one gateway.
 
+## Finding a service by the problem it solves
+
+A service that needs a capability (sort sats, summarize Markdown, solve SAT) does not need to
+know which service has it. The registry of
+[`celaut-project/skills`](https://github.com/celaut-project/skills) lists *skills* (problems) on
+the Ergo blockchain, and for each one the services that cover it (*coverages*), how it is
+measured (*benchmarks*) and how each service did (*results*). The library reads it
+(`service_library::skills`, `celaut skills`); it only reads. Publishing needs the wallet of a
+person to sign a transaction, and the registry has no command for it (its MCP server is read
+only too).
+
+1. `celaut skills` (`Skills::load_skills`): every skill, with `boxId`, `name`, `prose`, `tags`.
+   Match the name, tags and prose with what you need. There is no search call: the list is
+   short.
+2. `celaut skill <boxId>` (`load_skill_tree`): the skill, its `coverages` (`serviceId`), and its
+   `benchmarks` with their `results`. A result has `data[].metricsValues`, which go by position
+   with the `performanceMetrics` of its benchmark (`name`, `higherIsBetter`). `celaut covering
+   <boxId>` gives only the services.
+3. Pick a service. A coverage is a claim of whoever published it, and anyone can publish one:
+   prefer a service that has results in a benchmark that measures what you need (the registry
+   ranks by reputation: `profileId` is the publisher). `celaut service-info <serviceId>`
+   (`service_data`, `service_metadata`) says what the chain knows of a service without
+   downloading it (architecture, api, name); those two types are not minted yet in the
+   registry and the answer is empty until they are.
+4. Start it: the `serviceId` is the id that `celaut acquire --service HEX` and
+   `DependencyManager::add_service` take. The node must have it, or get it from its peers; if
+   you have the package, `--package FILE`.
+
+```sh
+celaut skills | jq -r '.[] | [.boxId, .name] | @tsv'
+celaut covering "$SKILL_BOX_ID" | jq -r '.[].serviceId'
+celaut acquire --service "$SERVICE_ID"
+```
+
+The registry is read from an Ergo Explorer: `--explorer URL`, else `$CELAUT_EXPLORER_API`, else
+the public one (`https://api.ergoplatform.com`). It needs no node and no wallet, so it works
+before any instance is started. A failure to reach the Explorer is exit code 3
+(`kind: "registry"`), and a search that finds nothing is `[]`. The Explorer is `https`: in
+Rust, turn on the feature `tls` of `service-library` (the `celaut` binary has it by default;
+`--no-default-features` builds a binary that is about 1 MB smaller and speaks `http://` only).
+The library returns at most 100 boxes of each kind.
+
 ## Developing and packaging services
 
 A service can be the *mother* of another: it takes the source of a service (or its own),
@@ -190,4 +232,7 @@ instance may use this call.
 - Checking that the id of the service in a package is the hash of its whole Service: the
   blocks are checked one by one, and the node checks the rest.
 - Tests against a real node: everything here is tested against a fake node and the vectors
-  of nodo only.
+  of nodo only. The skills registry was read from the public Explorer (7 skills at the time,
+  one with 4 coverages and 5 benchmarks), but a service found there was never started.
+- Publishing skills, coverages, benchmarks and results. The registry plans it in its MCP server
+  (signing with a seed in the environment, or an unsigned transaction signed outside).

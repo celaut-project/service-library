@@ -41,6 +41,18 @@ pub enum Error {
         /// What the packer said, or what went wrong.
         message: String,
     },
+    /// A call to the skills registry (an Ergo Explorer) failed (see [`crate::skills`]).
+    #[error("{operation} failed{}: {message}", status.map(|s| format!(" (HTTP {s})")).unwrap_or_default())]
+    Registry {
+        /// What the call did, for a person.
+        operation: String,
+        /// The HTTP status, if the explorer answered.
+        status: Option<u16>,
+        /// True if the explorer did not answer (no connection, or a time limit).
+        unreachable: bool,
+        /// What the explorer said, or what went wrong.
+        message: String,
+    },
     /// The gateway answered something that is not usable.
     #[error("unexpected answer: {0}")]
     Protocol(String),
@@ -55,6 +67,9 @@ impl Error {
                 unreachable: true,
                 ..
             } | Error::Packer {
+                unreachable: true,
+                ..
+            } | Error::Registry {
                 unreachable: true,
                 ..
             }

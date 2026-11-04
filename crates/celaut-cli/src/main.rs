@@ -21,6 +21,7 @@ use service_library::network;
 use service_library::observe::ObserveOptions;
 use service_library::package::{self, PackageInfo};
 use service_library::resources::Resizer;
+use service_library::skills::Skills;
 use service_library::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -47,6 +48,10 @@ Commands:
   pack      <lease> <project.zip> --out FILE [--wait SECS (60)] [--uri IP:PORT]
                                pack a project with the packer service (the instance of
                                <lease>, or --uri): {service, path, size}
+  skills    [--explorer URL]   the skills of the on-chain registry (celaut-project/skills)
+  skill     <box-id>           a skill, the services that cover it, its benchmarks and results
+  covering  <box-id>           only the services that cover a skill: [{service_id, ...}]
+  service-info <service-id>    what the chain says of a service: {data, metadata}
   deposit   <lease> <MU>       move MU to the instance (negative: back to you)
   tunnel    <lease> --slot N   send stdin to a port of the instance; the answer to stdout
   observe   <lease> [--packets] [--receipts]
@@ -65,6 +70,9 @@ DEP, one of:
   --package FILE               a .bee file
 and: [--root DIR (/)] [--block-dir DIR (<root>/__block__)] [--env K=V]...
      [--initial-mu MU] [--attempts N (5)] [--no-verify]
+
+The registry is read from an Ergo Explorer (--explorer URL, $CELAUT_EXPLORER_API, or the
+public one); it needs no node. The service id of a coverage is what `--service` takes.
 
 GLOBAL:
   --config PATH                the configuration of the node (/__config__)
@@ -556,6 +564,31 @@ async fn run(args: Args) -> Res<Value> {
                 "size": packed.size,
             }))
         }
+        "skills" | "skill" | "covering" | "service-info" => {
+            let skills = match args.value("explorer") {
+                Some(url) => Skills::new(url)?,
+                None => Skills::from_env()?,
+            };
+            match command {
+                "skills" => Ok(serde_json::to_value(skills.load_skills().await?)
+                    .map_err(|e| Fail::Other(e.to_string()))?),
+                "skill" => Ok(serde_json::to_value(
+                    skills.load_skill_tree(args.word(1, "the box id of the skill")?).await?,
+                )
+                .map_err(|e| Fail::Other(e.to_string()))?),
+                "covering" => Ok(serde_json::to_value(
+                    skills.load_coverages(args.word(1, "the box id of the skill")?).await?,
+                )
+                .map_err(|e| Fail::Other(e.to_string()))?),
+                _ => {
+                    let id = args.word(1, "the service id")?;
+                    Ok(json!({
+                        "data": skills.service_data(id).await?,
+                        "metadata": skills.service_metadata(id).await?,
+                    }))
+                }
+            }
+        }
         "inspect" => {
             let info = package::inspect(Path::new(args.word(1, "the package")?))?;
             Ok(json!({ "service": hex::encode(info.service_id) }))
@@ -847,6 +880,7 @@ fn report(fail: Fail) -> ExitCode {
                 Error::Resources(_) => "resources",
                 Error::Protocol(_) => "protocol",
                 Error::Packer { .. } => "packer",
+                Error::Registry { .. } => "registry",
             };
             (
                 if unreachable { 3 } else { 1 },
