@@ -105,6 +105,10 @@ pub struct Coverage {
     /// Set for a coverage of a benchmark (see [`Skills::load_benchmark_coverages`]); `None`
     /// for a coverage of a skill.
     pub benchmark_id: Option<String>,
+    /// The box id of the extended skill that owns this coverage, when the skill got it by
+    /// extending that one. `None` for an own coverage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
 }
 
 /// One case of a benchmark.
@@ -169,6 +173,9 @@ pub struct BenchmarkTree {
     #[serde(flatten)]
     pub benchmark: Benchmark,
     pub results: Vec<Measure>,
+    /// The box id of the extended skill that owns this benchmark, when it was inherited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
     /// The services that run this benchmark. They are not the ones that solve the skill: a
     /// service with a result is a solution, and this is who can measure the others.
     pub coverages: Vec<Coverage>,
@@ -182,6 +189,18 @@ pub struct SkillTree {
     pub skill: Option<Skill>,
     pub coverages: Vec<Coverage>,
     pub benchmarks: Vec<BenchmarkTree>,
+    /// The skills that this one extends, directly or not, nearest first.
+    pub extends: Vec<SkillRef>,
+    /// The skills that extend this one directly.
+    pub extended_by: Vec<SkillRef>,
+}
+
+/// A skill, by its box and its name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRef {
+    pub box_id: String,
+    pub name: String,
 }
 
 /// Where the content of a service box is.
@@ -363,6 +382,7 @@ impl Skills {
                 profile_id: profile_id(b, &r9),
                 service_id: optional_text(&r9, "service_id"),
                 benchmark_id: optional_text(&r9, "benchmark_id"),
+                inherited_from: None,
             }
         };
         let direct: Vec<Coverage> = boxes.iter().map(coverage).collect();
@@ -390,6 +410,7 @@ impl Skills {
                 profile_id: result.profile_id,
                 service_id: Some(result.service_id),
                 benchmark_id: None,
+                inherited_from: None,
             });
         }
         Ok(merged)
@@ -420,6 +441,7 @@ impl Skills {
                     profile_id: profile_id(b, &r9),
                     service_id: optional_text(&r9, "service_id"),
                     benchmark_id: Some(benchmark_id.to_string()),
+                    inherited_from: None,
                 }
             })
             .filter(|c| {
@@ -430,29 +452,96 @@ impl Skills {
             .collect())
     }
 
-    /// A skill with its coverages, its benchmarks and the measures of each.
+    /// A skill with its coverages, its benchmarks and the measures of each, and what the
+    /// skills that it extends have ([`Skills::load_skill_tree_with`] without it). See
+    /// [`inheritance`](self#extended-skills).
     pub async fn load_skill_tree(&self, skill_box_id: &str) -> Result<SkillTree, Error> {
-        let skill = self
-            .load_skills()
-            .await?
-            .into_iter()
-            .find(|s| s.box_id == skill_box_id);
-        let coverages = self.load_coverages(skill_box_id).await?;
-        let mut benchmarks = Vec::new();
-        for benchmark in self.load_benchmarks(skill_box_id).await? {
-            let results = self.load_results(&benchmark.id).await?;
-            let coverages = self.load_benchmark_coverages(&benchmark.id).await?;
-            benchmarks.push(BenchmarkTree {
-                benchmark,
-                results,
-                coverages,
-            });
+        self.load_skill_tree_with(skill_box_id, true).await
+    }
+
+    /// [`Skills::load_skill_tree`], with `inherit` false for only what the skill has itself.
+    pub async fn load_skill_tree_with(
+        &self,
+        skill_box_id: &str,
+        inherit: bool,
+    ) -> Result<SkillTree, Error> {
+        let skills = self.load_skills().await?;
+        let skill = skills.iter().find(|s| s.box_id == skill_box_id).cloned();
+        let extended = match (&skill, inherit) {
+            (Some(_), true) => collect_extended(&skills, skill_box_id),
+            _ => Vec::new(),
+        };
+        let mut pool = std::collections::HashMap::new();
+        for id in std::iter::once(skill_box_id).chain(extended.iter().map(|s| s.box_id.as_str())) {
+            let mut benchmarks = Vec::new();
+            for benchmark in self.load_benchmarks(id).await? {
+                let results = self.load_results(&benchmark.id).await?;
+                let coverages = self.load_benchmark_coverages(&benchmark.id).await?;
+                benchmarks.push(BenchmarkTree {
+                    benchmark,
+                    results,
+                    inherited_from: None,
+                    coverages,
+                });
+            }
+            let extends = skills
+                .iter()
+                .find(|s| s.box_id == id)
+                .map(|s| s.extended_skill_box_ids.clone())
+                .unwrap_or_default();
+            pool.insert(
+                id.to_string(),
+                Own {
+                    extends,
+                    coverages: self.load_coverages(id).await?,
+                    benchmarks,
+                },
+            );
         }
+        let (coverages, benchmarks) = resolve(skill_box_id, &pool, &mut Default::default());
         Ok(SkillTree {
             skill,
-            coverages,
+            coverages: dedupe_services(coverages),
             benchmarks,
+            extends: extended.iter().map(skill_ref).collect(),
+            extended_by: collect_extenders(&skills, skill_box_id)
+                .iter()
+                .map(skill_ref)
+                .collect(),
         })
+    }
+
+    /// The services that solve a skill, and the ones that solve the skills that it extends
+    /// (`inherit`): what an agent that needs a capability starts from. A service is once; the
+    /// own coverage comes first, then the nearest.
+    pub async fn load_coverages_inherited(
+        &self,
+        skill_box_id: &str,
+        inherit: bool,
+    ) -> Result<Vec<Coverage>, Error> {
+        if !inherit {
+            return self.load_coverages(skill_box_id).await;
+        }
+        let skills = self.load_skills().await?;
+        let extended = collect_extended(&skills, skill_box_id);
+        let mut pool = std::collections::HashMap::new();
+        for id in std::iter::once(skill_box_id).chain(extended.iter().map(|s| s.box_id.as_str())) {
+            let extends = skills
+                .iter()
+                .find(|s| s.box_id == id)
+                .map(|s| s.extended_skill_box_ids.clone())
+                .unwrap_or_default();
+            pool.insert(
+                id.to_string(),
+                Own {
+                    extends,
+                    coverages: self.load_coverages(id).await?,
+                    benchmarks: Vec::new(),
+                },
+            );
+        }
+        let (coverages, _) = resolve(skill_box_id, &pool, &mut Default::default());
+        Ok(dedupe_services(coverages))
     }
 
     /// What the chain says of the functional part of a service (`container`, `api`,
@@ -569,6 +658,114 @@ impl Skills {
         serde_json::from_slice(&answer)
             .map_err(|e| registry_failed(operation, None, format!("not JSON: {e}")))
     }
+}
+
+// ── Extended skills ──────────────────────────────────────────────────────────
+//
+// A skill that lists another in `extended_skill_boxes` inherits its coverages and benchmarks,
+// through any depth: it is the parent, and the extended one is nested under it. So a general
+// skill extends the specific ones, and the services of the specific ones are services of the
+// general one. The same rule as `applySkillInheritance` in the registry (`core.mjs`), which
+// its web app and its MCP server use.
+
+/// What a skill has itself, and what it extends.
+struct Own {
+    extends: Vec<String>,
+    coverages: Vec<Coverage>,
+    benchmarks: Vec<BenchmarkTree>,
+}
+
+fn skill_ref(s: &Skill) -> SkillRef {
+    SkillRef {
+        box_id: s.box_id.clone(),
+        name: s.name.clone(),
+    }
+}
+
+/// The skills that `box_id` extends, directly or not, nearest first, once each. A cycle is
+/// cut where it closes, `box_id` is not in the list, and an id that is not in `skills` is
+/// skipped.
+fn collect_extended(skills: &[Skill], box_id: &str) -> Vec<Skill> {
+    let Some(start) = skills.iter().find(|s| s.box_id == box_id) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::from([box_id.to_string()]);
+    let mut out = Vec::new();
+    let mut level = vec![start];
+    while !level.is_empty() {
+        let mut next = Vec::new();
+        for skill in level {
+            for id in &skill.extended_skill_box_ids {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(target) = skills.iter().find(|s| &s.box_id == id) {
+                    out.push(target.clone());
+                    next.push(target);
+                }
+            }
+        }
+        level = next;
+    }
+    out
+}
+
+/// The skills that extend `box_id` directly.
+fn collect_extenders(skills: &[Skill], box_id: &str) -> Vec<Skill> {
+    skills
+        .iter()
+        .filter(|s| s.box_id != box_id && s.extended_skill_box_ids.iter().any(|e| e == box_id))
+        .cloned()
+        .collect()
+}
+
+/// The coverages and benchmarks of a skill with what it inherits: its own first, then those of
+/// each skill it extends (resolved the same way), once per box. An inherited entry says whose
+/// it is. A skill that is already being resolved (a cycle) gives only what it has itself.
+fn resolve(
+    id: &str,
+    pool: &std::collections::HashMap<String, Own>,
+    active: &mut std::collections::HashSet<String>,
+) -> (Vec<Coverage>, Vec<BenchmarkTree>) {
+    let Some(own) = pool.get(id) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut coverages = own.coverages.clone();
+    let mut benchmarks = own.benchmarks.clone();
+    if !active.insert(id.to_string()) {
+        return (coverages, benchmarks);
+    }
+    for parent in &own.extends {
+        if !pool.contains_key(parent) {
+            continue;
+        }
+        let (c, b) = resolve(parent, pool, active);
+        coverages.extend(c.into_iter().map(|mut c| {
+            c.inherited_from.get_or_insert_with(|| parent.clone());
+            c
+        }));
+        benchmarks.extend(b.into_iter().map(|mut b| {
+            b.inherited_from.get_or_insert_with(|| parent.clone());
+            b
+        }));
+    }
+    active.remove(id);
+    let mut seen = std::collections::HashSet::new();
+    coverages.retain(|c| seen.insert(c.box_id.clone()));
+    let mut seen = std::collections::HashSet::new();
+    benchmarks.retain(|b| seen.insert(b.benchmark.id.clone()));
+    (coverages, benchmarks)
+}
+
+/// The same service is once: the first one wins.
+fn dedupe_services(mut coverages: Vec<Coverage>) -> Vec<Coverage> {
+    let mut seen = std::collections::HashSet::new();
+    coverages.retain(|c| {
+        c.service_id
+            .as_ref()
+            .is_none_or(|id| seen.insert(id.clone()))
+    });
+    coverages
 }
 
 impl Endpoint {

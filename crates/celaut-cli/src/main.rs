@@ -49,8 +49,12 @@ Commands:
                                pack a project with the packer service (the instance of
                                <lease>, or --uri): {service, path, size}
   skills    [--explorer URL]   the skills of the on-chain registry (celaut-project/skills)
-  skill     <box-id>           a skill, the services that cover it, its benchmarks and results
-  covering  <box-id>           only the services that cover a skill: [{service_id, ...}]
+  skill     <box-id> [--no-inherit]
+                               a skill, the services that cover it, its benchmarks and results,
+                               with what the skills that it extends have (inheritedFrom)
+  covering  <box-id> [--no-inherit]
+                               only the services that cover a skill (and the skills that it
+                               extends): [{serviceId, ...}]
   service-info <service-id>    what the chain says of a service: {data, metadata}
   deposit   <lease> <MU>       move MU to the instance (negative: back to you)
   tunnel    <lease> --slot N   send stdin to a port of the instance; the answer to stdout
@@ -90,6 +94,7 @@ const SWITCHES: &[&str] = &[
     "no-verify",
     "packets",
     "receipts",
+    "no-inherit",
     "require-receipt",
     "no-receipt-check",
     "help",
@@ -579,13 +584,19 @@ async fn run(args: Args) -> Res<Value> {
                     .map_err(|e| Fail::Other(e.to_string()))?),
                 "skill" => Ok(serde_json::to_value(
                     skills
-                        .load_skill_tree(args.word(1, "the box id of the skill")?)
+                        .load_skill_tree_with(
+                            args.word(1, "the box id of the skill")?,
+                            !args.has("no-inherit"),
+                        )
                         .await?,
                 )
                 .map_err(|e| Fail::Other(e.to_string()))?),
                 "covering" => Ok(serde_json::to_value(
                     skills
-                        .load_coverages(args.word(1, "the box id of the skill")?)
+                        .load_coverages_inherited(
+                            args.word(1, "the box id of the skill")?,
+                            !args.has("no-inherit"),
+                        )
                         .await?,
                 )
                 .map_err(|e| Fail::Other(e.to_string()))?),

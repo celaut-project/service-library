@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 const SKILL: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
 const BENCH: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+const GENERAL: &str = "dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44";
 const SVC_A: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 const SVC_C: &str = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 const SVC_B: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
@@ -27,11 +28,21 @@ fn explorer_box(box_id: &str, r9: Value) -> Value {
 /// The boxes that the fake Explorer holds, by (R4, R5).
 fn registry(r4: &str, r5: Option<&str>) -> Vec<Value> {
     match (r4, r5) {
-        (t, None) if t == SKILL_TYPE_ID => vec![explorer_box(
-            SKILL,
-            json!({"name": "Sat-sorter", "prose": "sort sats", "tags": ["utxo"],
-                   "extended_skill_boxes": [], "profile_id": "pp"}),
-        )],
+        (t, None) if t == SKILL_TYPE_ID => vec![
+            explorer_box(
+                SKILL,
+                json!({"name": "Sat-sorter", "prose": "sort sats", "tags": ["utxo"],
+                       "extended_skill_boxes": [], "profile_id": "pp"}),
+            ),
+            // It extends the first one, so it inherits its services and benchmarks.
+            explorer_box(
+                GENERAL,
+                json!({"name": "General sorter", "extended_skill_boxes": [SKILL]}),
+            ),
+        ],
+        (t, Some(GENERAL)) if t == COVERAGE_TYPE_ID => {
+            vec![explorer_box("cg", json!({"service_id": SVC_B}))]
+        }
         (t, Some(SKILL)) if t == COVERAGE_TYPE_ID => {
             vec![explorer_box("c1", json!({"service_id": SVC_A}))]
         }
@@ -139,7 +150,7 @@ async fn the_skill_tree_is_what_the_registry_holds() {
     let skills = Skills::new(&uri).unwrap();
 
     let list = skills.load_skills().await.unwrap();
-    assert_eq!(list.len(), 1);
+    assert_eq!(list.len(), 2);
     assert_eq!(list[0].box_id, SKILL);
     assert_eq!(list[0].name, "Sat-sorter");
     assert_eq!(list[0].profile_id, "pp");
@@ -182,6 +193,68 @@ async fn the_skill_tree_is_what_the_registry_holds() {
     assert_eq!(bench.results.len(), 2);
     assert_eq!(bench.results[0].data[0].metrics_values, [2.5]);
     assert_eq!(bench.results[0].timestamp, 5);
+}
+
+#[tokio::test]
+async fn a_skill_inherits_what_the_skills_it_extends_have() {
+    let (uri, _seen) = serve(false, None).await;
+    let skills = Skills::new(&uri).unwrap();
+
+    let tree = skills.load_skill_tree(GENERAL).await.unwrap();
+    assert_eq!(
+        tree.extends
+            .iter()
+            .map(|s| s.box_id.as_str())
+            .collect::<Vec<_>>(),
+        [SKILL]
+    );
+    assert!(tree.extended_by.is_empty());
+    // Its own first (SVC_B), then those of the extended skill (SVC_A; SVC_B is not twice).
+    let services: Vec<_> = tree
+        .coverages
+        .iter()
+        .map(|c| (c.service_id.clone().unwrap(), c.inherited_from.clone()))
+        .collect();
+    assert_eq!(
+        services,
+        [
+            (SVC_B.to_string(), None),
+            (SVC_A.to_string(), Some(SKILL.to_string()))
+        ]
+    );
+    assert_eq!(tree.benchmarks.len(), 1);
+    assert_eq!(tree.benchmarks[0].inherited_from.as_deref(), Some(SKILL));
+    assert_eq!(tree.benchmarks[0].results.len(), 2);
+
+    // The extended skill gets nothing from the one that extends it, and knows it.
+    let base = skills.load_skill_tree(SKILL).await.unwrap();
+    assert!(base.coverages.iter().all(|c| c.inherited_from.is_none()));
+    assert_eq!(
+        base.extended_by
+            .iter()
+            .map(|s| s.box_id.as_str())
+            .collect::<Vec<_>>(),
+        [GENERAL]
+    );
+
+    // Without inheritance, only its own.
+    let own = skills.load_skill_tree_with(GENERAL, false).await.unwrap();
+    assert_eq!(own.coverages.len(), 1);
+    assert!(own.benchmarks.is_empty() && own.extends.is_empty());
+
+    let covering = skills
+        .load_coverages_inherited(GENERAL, true)
+        .await
+        .unwrap();
+    assert_eq!(covering.len(), 2);
+    assert_eq!(
+        skills
+            .load_coverages_inherited(GENERAL, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
