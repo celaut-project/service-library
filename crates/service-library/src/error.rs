@@ -29,6 +29,18 @@ pub enum Error {
     /// would not grow it, or the time to wait ended.
     #[error("not enough memory: {0}")]
     Resources(String),
+    /// A call to the packer service failed (see [`crate::packer`]).
+    #[error("{operation} failed{}: {message}", status.map(|s| format!(" (HTTP {s})")).unwrap_or_default())]
+    Packer {
+        /// What the call did, for a person.
+        operation: String,
+        /// The HTTP status, if the packer answered.
+        status: Option<u16>,
+        /// True if the packer did not answer (no connection, or a time limit).
+        unreachable: bool,
+        /// What the packer said, or what went wrong.
+        message: String,
+    },
     /// The gateway answered something that is not usable.
     #[error("unexpected answer: {0}")]
     Protocol(String),
@@ -40,6 +52,9 @@ impl Error {
         matches!(
             self,
             Error::Gateway {
+                unreachable: true,
+                ..
+            } | Error::Packer {
                 unreachable: true,
                 ..
             }

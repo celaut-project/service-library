@@ -113,22 +113,53 @@ service and to clients. A service talks to one gateway.
 
 A service can be the *mother* of another: it takes the source of a service (or its own),
 changes it and packs it again, then starts the result as a dependency. This is an evolving
-pattern. The packer is itself a service,
+pattern. A service **cannot** ask its node to pack: the gateway has no `Pack` call, and
+`nodo pack` is a command of the operator. The way is the **packer service**,
 [`bee-rpc-protocol/celaut-packer-service`](https://github.com/bee-rpc-protocol/celaut-packer-service),
-which does what `nodo pack` does over HTTP on port 8080:
+which does what `nodo pack` does over HTTP on port 8080. It is a service like any other: you
+start it as a dependency, and the library has a client for it (`service_library::packer`,
+`celaut pack`).
 
-1. Start the packer as a dependency, and reach it at the address of its instance.
-2. `POST /pack` with a zip of the project (`Dockerfile`, `service.json` and optionally
-   `pack_config.json`). The answer is a `.celaut.bee` file; the header `X-Service-Id` has the
-   id. `GET /health` says when it is ready. Errors: 415 (not a zip), 400 (config or packing
-   error, with a numbered list of what to fix), 413 (too large). The packer also serves a
-   browser IDE with templates, and its `SERVICE_CONFIG_GUIDE.md` describes `service.json`.
-3. Write the answer to a file, `package::inspect` it, and `add_package` it: the first instance
-   sends the file to your node.
+1. Start the packer as a dependency. Its id is the `packer` of the `core_services` of the
+   node. With the library: `DependencyManager::add_service` and `ServiceHandle::acquire`; with
+   the command: `celaut acquire --service <packer id>`, which gives `{"lease", "uri"}`. If the
+   node does not have the packer, give it to it first (`add_package`, or `--package FILE`); a
+   start can take minutes while the node boots it.
+2. Zip the project: `Dockerfile`, `service.json` and optionally `pack_config.json` (the
+   layout is the one of nodo's `docs/PACKING.md`).
+3. Pack. `Packer::new(&lease.uri())` and `packer.pack(&zip, &out).await`; or
+   `celaut pack <lease> project.zip --out out.celaut.bee`. It waits for `GET /health`
+   (the command, up to `--wait` seconds), sends `POST /pack` with no time limit (a build takes
+   minutes; `with_pack_timeout` sets one), writes the answer through a partial file, and checks
+   that the id that the file names is the `X-Service-Id` of the packer: on a mismatch there is no
+   file. The result is `{service, path, size}`. The packer answers 415 (not a zip), 400 (the
+   configuration or the packing is wrong, with a numbered list of what to fix) and 413 (too
+   large); they are `Error::Packer { status, message, .. }` with the text of the packer, and
+   `is_unreachable` is true when the instance does not answer.
+4. `add_package(out)` (or `celaut acquire --package out.celaut.bee`): the first instance
+   sends the file to your node, and the next ones start by hash.
+5. Give the packer back (`release`, then `stop` or `shutdown` when you are done): an instance
+   that nobody stops keeps billing.
 
-Check that the id you start is the one that the packer said, and keep the budget of the new
-instance small (`Configuration.initial_mu`). Packing needs the packer to reach container
-registries, so give it the network that its `service.json` asks for.
+```sh
+# a service in any language, with the celaut command
+celaut acquire --service "$PACKER_ID"                  # {"lease":1,"uri":"10.0.0.9:8080","new":true}
+zip -qr /tmp/project.zip Dockerfile service.json
+celaut pack 1 /tmp/project.zip --out /tmp/out.celaut.bee    # {"service":"<id>","path":...,"size":...}
+celaut release 1 --outcome success
+celaut acquire --package /tmp/out.celaut.bee --initial-mu 1000
+```
+
+`uri` is the first address that the packer declares in its interface; if you reach the packer
+by another address, `celaut pack --uri IP:PORT <zip> --out FILE` takes it.
+
+Keep the budget of the new instance small (`Configuration.initial_mu`). Packing needs the
+packer to reach container registries, so give it the network that its `service.json` asks
+for. A dependency of the project that names a service by its id (not a git URL or a path
+inside the zip) is not in the registry of the packer, which starts empty: `Packer::has_dependency`
+(`GET /registry/<id>`) says if it has it, and `Packer::upload_dependency(id, bundle)`
+(`POST /registry/<id>`) gives it a gzip tar with `service`, `metadata` (if any) and
+`blocks/<id>`, the bundle that `nodo pack` builds. The command has no call for this yet.
 
 ## Memory of the service
 

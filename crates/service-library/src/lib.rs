@@ -20,6 +20,7 @@ pub mod manager;
 pub mod network;
 pub mod observe;
 pub mod package;
+pub mod packer;
 pub mod receipt;
 pub mod relay;
 pub mod resources;

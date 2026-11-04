@@ -18,11 +18,12 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::tunnel` | A streaming `ServiceTunnel` with the check of the signed checkpoints of the node, ported from chatui and tested against an in-process node that lies. |
 | `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`; `add_service` by hash and `add_package` from a `.bee` file (checked block by block); `add_directory_package` from `__services__/<hash>` and `__metadata__/<hash>` directories (read with `bee_rpc::store`); per-dependency options; start retries; `Lease::call` records how a call went; LIFO reuse; `tcp_is_alive`; optional check of the start receipt. |
 | `service-library::resources` | `ResourceManager`: a memory pool that asks the node for more (`ModifyServiceSystemResources`) when a lock does not fit and shrinks when it is freed; `lock`, `lock_for`, `try_lock`, `stats`. |
+| `service-library::packer` | A client of the packer service ([`celaut-packer-service`](https://github.com/bee-rpc-protocol/celaut-packer-service)): `health`, `pack` (a zip in, a `.bee` out, the id checked), `has_dependency` and `upload_dependency`. Plain HTTP over TCP, no HTTP crate. Tested against an in-process server. `celaut pack` is the command. |
 | `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
 | `service-library::relay`, `skips`, `counter` | Sends a service to the node with an early answer: a node that has it stops the transfer, and a node that holds some blocks makes the library skip them. Ported from chatui with its tests against an in-process node. |
 | `service-library::receipt` | The check of execution receipts, ported from chatui with the vectors of nodo (`check_start` for the start receipt). |
 | `crates/celaut-cli` | `celaut`: the library as a command, for a service in any language (see below). |
-| `SKILL.md` | What an AI agent that runs as a service has to know, and what it can leave out. |
+| `SKILL.md` | What an AI agent that runs as a service has to know, and what it can leave out. It includes how to pack a service with the packer service (there is no `Pack` call in the gateway). |
 
 ## `celaut`: the command, for a service in any language
 
@@ -51,7 +52,7 @@ celaut shutdown                      # stop every instance, when the service end
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
-`metrics`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
+`metrics`, `pack`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.

@@ -13,6 +13,7 @@ use std::time::Duration;
 use celaut_proto::celaut::{Amount, BytesKeyValue, Configuration, ServiceInstance as Started};
 use prost::Message;
 use serde_json::{json, Value};
+use service_library::packer::Packer;
 use service_library::config::{grpc_uri, NodeConfig, DEFAULT_CONFIG_PATH};
 use service_library::gateway::{amount, Gateway, Node};
 use service_library::manager::tcp_is_alive;
@@ -43,6 +44,9 @@ Commands:
                                stop the idle instances that are old or broken
   shutdown                     stop every instance of the pool
   metrics   <lease>            the balance of the instance
+  pack      <lease> <project.zip> --out FILE [--wait SECS (60)] [--uri IP:PORT]
+                               pack a project with the packer service (the instance of
+                               <lease>, or --uri): {service, path, size}
   deposit   <lease> <MU>       move MU to the instance (negative: back to you)
   tunnel    <lease> --slot N   send stdin to a port of the instance; the answer to stdout
   observe   <lease> [--packets] [--receipts]
@@ -515,6 +519,43 @@ async fn run(args: Args) -> Res<Value> {
                 "networks": networks,
             }))
         }
+        "pack" => {
+            // `pack <lease> <zip>`, or `pack --uri IP:PORT <zip>`.
+            let zip = args
+                .word(if args.has("uri") { 1 } else { 2 }, "the project zip")?
+                .to_string();
+            let out = args
+                .value("out")
+                .ok_or_else(|| usage("pack needs --out FILE"))?
+                .to_string();
+            let wait = args.number::<u64>("wait")?.unwrap_or(60);
+            let uri = match args.value("uri") {
+                Some(uri) => uri.to_string(),
+                None => {
+                    let lease = args.lease()?;
+                    ctx.pool(|p| p.instances.iter().find(|i| i.id == lease).map(|i| i.uri.clone()))?
+                        .ok_or_else(|| Fail::Other(format!("no lease {lease}")))?
+                }
+            };
+            let packer = Packer::new(&uri);
+            // A packer that was just started may not answer yet.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+            loop {
+                match packer.health().await {
+                    Ok(()) => break,
+                    Err(e) if e.is_unreachable() && std::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let packed = packer.pack(Path::new(&zip), Path::new(&out)).await?;
+            Ok(json!({
+                "service": packed.service_id,
+                "path": packed.path,
+                "size": packed.size,
+            }))
+        }
         "inspect" => {
             let info = package::inspect(Path::new(args.word(1, "the package")?))?;
             Ok(json!({ "service": hex::encode(info.service_id) }))
@@ -805,6 +846,7 @@ fn report(fail: Fail) -> ExitCode {
                 Error::Receipt(_) => "receipt",
                 Error::Resources(_) => "resources",
                 Error::Protocol(_) => "protocol",
+                Error::Packer { .. } => "packer",
             };
             (
                 if unreachable { 3 } else { 1 },
