@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 const SKILL: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
 const BENCH: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
 const SVC_A: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
+const SVC_C: &str = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 const SVC_B: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
 
 /// A box of the Explorer: R9 is JSON, rendered as hex.
@@ -39,6 +40,11 @@ fn registry(r4: &str, r5: Option<&str>) -> Vec<Value> {
             json!({"name": "12 months",
                    "case_descriptors": [{"name": "case0", "description": "d"}],
                    "performance_metrics": [{"name": "ms", "description": "time", "higher_is_better": false}]}),
+        )],
+        // A coverage about a benchmark of the skill, not about the skill.
+        (t, Some(BENCH)) if t == COVERAGE_TYPE_ID => vec![explorer_box(
+            "c2",
+            json!({"service_id": SVC_C, "skill_box_id": SKILL, "benchmark_id": BENCH}),
         )],
         (t, Some(BENCH)) if t == RESULT_TYPE_ID => vec![
             explorer_box(
@@ -157,9 +163,13 @@ async fn the_skill_tree_is_what_the_registry_holds() {
         .iter()
         .map(|c| c.service_id.clone().unwrap())
         .collect();
-    assert_eq!(services, [SVC_A, SVC_B]);
+    // The coverage about the benchmark comes after the direct ones and before the results.
+    assert_eq!(services, [SVC_A, SVC_C, SVC_B]);
     assert_eq!(tree.coverages[0].box_id, "c1");
-    assert_eq!(tree.coverages[1].box_id, "r2");
+    assert_eq!(tree.coverages[0].benchmark_id, None);
+    assert_eq!(tree.coverages[1].box_id, "c2");
+    assert_eq!(tree.coverages[1].benchmark_id.as_deref(), Some(BENCH));
+    assert_eq!(tree.coverages[2].box_id, "r2");
 
     let bench = &tree.benchmarks[0];
     assert_eq!(bench.benchmark.name, "12 months");

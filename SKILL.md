@@ -123,7 +123,8 @@ only too).
 1. `celaut skills` (`Skills::load_skills`): every skill, with `boxId`, `name`, `prose`, `tags`.
    Match the name, tags and prose with what you need. There is no search call: the list is
    short.
-2. `celaut skill <boxId>` (`load_skill_tree`): the skill, its `coverages` (`serviceId`), and its
+2. `celaut skill <boxId>` (`load_skill_tree`): the skill, its `coverages` (`serviceId`; `benchmarkId` if
+   the coverage is about one benchmark of the skill, or comes from a result in it), and its
    `benchmarks` with their `results`. A result has `data[].metricsValues`, which go by position
    with the `performanceMetrics` of its benchmark (`name`, `higherIsBetter`). `celaut covering
    <boxId>` gives only the services.

@@ -102,6 +102,9 @@ pub struct Coverage {
     /// The id of the service, in hex, which [`crate::manager::DependencyManager::add_service`]
     /// takes. A coverage from a result has it always.
     pub service_id: Option<String>,
+    /// The benchmark that the coverage points at, if it is about one benchmark of the skill
+    /// and not about the whole skill.
+    pub benchmark_id: Option<String>,
 }
 
 /// One case of a benchmark.
@@ -343,23 +346,30 @@ impl Skills {
             .collect())
     }
 
-    /// The services that cover a skill: the coverages that point at it, and the services that
-    /// have a result in one of its benchmarks. A service is once, and a direct coverage wins.
+    /// The services that cover a skill: the coverages that point at it or at one of its
+    /// benchmarks, and the services that have a result in one of its benchmarks. A service is once, and a direct coverage wins.
     /// This is the call to start from when a service needs a capability.
     pub async fn load_coverages(&self, skill_box_id: &str) -> Result<Vec<Coverage>, Error> {
         let boxes = self
             .boxes("load_coverages", COVERAGE_TYPE_ID, Some(skill_box_id))
             .await?;
-        let direct = boxes.iter().map(|b| {
+        let coverage = |b: &Value| {
             let r9 = register9(b);
             Coverage {
                 box_id: text(b, "boxId"),
                 profile_id: profile_id(b, &r9),
                 service_id: optional_text(&r9, "service_id"),
+                benchmark_id: optional_text(&r9, "benchmark_id"),
             }
-        });
+        };
+        let mut direct: Vec<Coverage> = boxes.iter().map(coverage).collect();
         let mut results = Vec::new();
         for benchmark in self.load_benchmarks(skill_box_id).await? {
+            // A coverage may point at a benchmark of the skill instead of the skill.
+            let about_benchmark = self
+                .boxes("load_coverages", COVERAGE_TYPE_ID, Some(&benchmark.id))
+                .await?;
+            direct.extend(about_benchmark.iter().map(coverage));
             results.extend(self.load_results(&benchmark.id).await?);
         }
 
@@ -381,6 +391,7 @@ impl Skills {
                 box_id: result.id,
                 profile_id: result.profile_id,
                 service_id: Some(result.service_id),
+                benchmark_id: Some(result.benchmark_id),
             });
         }
         Ok(merged)
