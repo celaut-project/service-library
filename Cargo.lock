@@ -76,8 +76,8 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bee-rpc"
-version = "0.4.1"
-source = "git+https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-rs?tag=v0.4.1#bba593442f2768757ca16a9a0f2fc5dc2c28d280"
+version = "0.4.2"
+source = "git+https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-rs?tag=v0.4.2#a7b7053ea15e33e109592817be72c161fd59a04f"
 dependencies = [
  "blake2",
  "prost",
@@ -234,7 +234,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

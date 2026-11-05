@@ -11,7 +11,7 @@ license = "GPL-3.0-only"
 [workspace.dependencies]
 celaut-proto = { path = "crates/celaut-proto" }
 # A git dependency on a tag until bee-rpc is published (the same pin as chatui).
-bee-rpc = { git = "https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-rs", tag = "v0.4.1", features = ["grpc"] }
+bee-rpc = { git = "https://github.com/bee-rpc-protocol/bee-rpc-over-grpc-rs", tag = "v0.4.2", features = ["grpc"] }
 
 # Small, static binaries: `celaut` ships inside the containers of services.
 [profile.release]
