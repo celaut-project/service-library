@@ -35,7 +35,7 @@ stays) for each architecture of a node. Each tag `v*` publishes it in the releas
 
 ```Dockerfile
 FROM python:3.13-alpine
-ADD --chmod=755 https://github.com/celaut-project/service-library/releases/download/v0.3.1/celaut-linux-arm64 /usr/local/bin/celaut
+ADD --chmod=755 https://github.com/celaut-project/service-library/releases/download/v0.3.2/celaut-linux-arm64 /usr/local/bin/celaut
 ```
 
 Each command prints one JSON on stdout. An error is JSON on stderr
