@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use celaut_proto::celaut::observe_event;
 use celaut_proto::celaut::{Amount, BytesKeyValue, Configuration, ServiceInstance as Started};
 use prost::Message;
 use serde_json::{json, Value};
@@ -499,6 +500,62 @@ fn mu(a: Option<&Amount>) -> Res<String> {
     Ok(amount(a)?.to_string())
 }
 
+/// The fields of an event of `observe`, as JSON for a service in any language. The bytes of a
+/// captured frame (`raw_frame`) are left out: a service that needs them reads the stream with
+/// the library.
+fn event_data(payload: &observe_event::Payload) -> Value {
+    use observe_event::Payload;
+    match payload {
+        Payload::Session(s) => json!({
+            "instance_id": s.instance_id,
+            "tag": s.tag,
+            "capture_mode": s.capture_mode,
+            "degraded_reason": s.degraded_reason,
+            "link_type": s.link_type,
+            "snaplen": s.snaplen,
+            "balance": s.balance,
+        }),
+        Payload::Metrics(m) => json!({
+            "alive": m.alive,
+            "cpu_percent": m.cpu_percent,
+            "mem_bytes": m.mem_bytes,
+            "mem_peak_bytes": m.mem_peak_bytes,
+            "disk_read_bytes": m.disk_read_bytes,
+            "disk_write_bytes": m.disk_write_bytes,
+            "net_rx_bytes": m.net_rx_bytes,
+            "net_tx_bytes": m.net_tx_bytes,
+            "net_rx_packets": m.net_rx_packets,
+            "net_tx_packets": m.net_tx_packets,
+            "balance": m.balance,
+        }),
+        Payload::Packet(p) => json!({
+            "direction": p.direction,
+            "transport": p.transport,
+            "protocol": p.protocol,
+            "tcp_flags": p.tcp_flags,
+            "src": p.src,
+            "dst": p.dst,
+            "frame_len": p.frame_len,
+            "peer_kind": p.peer_kind,
+            "peer_instance_id": p.peer_instance_id,
+            "peer_tag": p.peer_tag,
+            "peer_relationship": p.peer_relationship,
+            "peer_host": p.peer_host,
+            "source": p.source,
+            "frame_timestamp": p.frame_timestamp,
+        }),
+        Payload::Notice(n) => json!({ "message": n.message, "degraded": n.degraded }),
+        Payload::Receipt(r) => json!({
+            "kind": r.kind,
+            "plane": r.plane,
+            "seq": r.seq,
+            "coverage": r.coverage,
+            "capture_mode": r.capture_mode,
+            "degraded_reason": r.degraded_reason,
+        }),
+    }
+}
+
 async fn run(args: Args) -> Res<Value> {
     let ctx = Context {
         config_path: PathBuf::from(args.value("config").unwrap_or(DEFAULT_CONFIG_PATH)),
@@ -853,6 +910,7 @@ async fn run(args: Args) -> Res<Value> {
                 let line = json!({
                     "time": event.time,
                     "kind": event.kind,
+                    "data": event.payload.as_ref().map(event_data),
                     "payload": event.payload.map(|p| format!("{p:?}")),
                 });
                 out.write_all(format!("{line}\n").as_bytes()).await?;

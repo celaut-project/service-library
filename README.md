@@ -36,7 +36,7 @@ stays) for each architecture of a node. Each tag `v*` publishes it in the releas
 
 ```Dockerfile
 FROM python:3.13-alpine
-ADD --chmod=755 https://github.com/celaut-project/service-library/releases/download/v0.4.0/celaut-linux-arm64 /usr/local/bin/celaut
+ADD --chmod=755 https://github.com/celaut-project/service-library/releases/download/v0.4.1/celaut-linux-arm64 /usr/local/bin/celaut
 ```
 
 Each command prints one JSON on stdout. An error is JSON on stderr
@@ -55,7 +55,7 @@ The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state`
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
 `metrics`, `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
-lines), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
+lines; `data` holds the fields of the event: the session, the packets with their peer, the notices), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.
 

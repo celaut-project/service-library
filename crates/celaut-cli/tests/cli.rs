@@ -200,6 +200,41 @@ impl tonic::server::StreamingService<Buffer> for Method {
                     }
                     .encode_to_vec()
                 }
+                "/celaut.Gateway/Observe" => {
+                    use celaut_proto::celaut::observe_event::{Packet, Payload, Session};
+                    use celaut_proto::celaut::ObserveEvent;
+                    let events = [
+                        ObserveEvent {
+                            time: "10:00:00".into(),
+                            kind: "session".into(),
+                            payload: Some(Payload::Session(Session {
+                                instance_id: "token-0".into(),
+                                tag: "ping".into(),
+                                capture_mode: "pcap".into(),
+                                ..Default::default()
+                            })),
+                        },
+                        ObserveEvent {
+                            time: "10:00:01".into(),
+                            kind: "packet".into(),
+                            payload: Some(Payload::Packet(Packet {
+                                direction: "IN".into(),
+                                protocol: "tcp".into(),
+                                src: "93.184.216.34:80".into(),
+                                peer_kind: "external".into(),
+                                peer_host: "93.184.216.34".into(),
+                                raw_frame: vec![1, 2, 3],
+                                ..Default::default()
+                            })),
+                        },
+                    ];
+                    for e in events {
+                        for b in serialize_part(&Part::new(1, e.encode_to_vec())) {
+                            let _ = tx.send(Ok(b)).await;
+                        }
+                    }
+                    return;
+                }
                 "/celaut.Gateway/StopService" => {
                     counts.stopped.fetch_add(1, Ordering::SeqCst);
                     Refund { amount: mu(7) }.encode_to_vec()
@@ -549,5 +584,49 @@ async fn verify_reads_nothing_beyond_its_budget_and_needs_one() {
 
     let (code, error) = celaut(&dir, &["verify", "--budget", "10", "99"]).await;
     assert_eq!(code, 1, "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn observe_gives_the_fields_of_each_event_as_json() {
+    let (_, dir) = node().await;
+    let dep = ["--service", SERVICE, "--root", "/nonexistent"];
+    let (_, first) = celaut(&dir, &[&["acquire"][..], &dep].concat()).await;
+    let lease = first["lease"].to_string();
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_celaut"))
+        .arg("--config")
+        .arg(dir.join("__config__"))
+        .arg("--state")
+        .arg(dir.join("pool.json"))
+        .args(["observe", &lease, "--packets"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["kind"], "session");
+    assert_eq!(lines[0]["data"]["capture_mode"], "pcap");
+    assert_eq!(lines[0]["data"]["instance_id"], "token-0");
+    assert_eq!(lines[1]["kind"], "packet");
+    assert_eq!(lines[1]["data"]["direction"], "IN");
+    assert_eq!(lines[1]["data"]["peer_kind"], "external");
+    assert_eq!(lines[1]["data"]["peer_host"], "93.184.216.34");
+    assert!(
+        lines[1]["data"].get("raw_frame").is_none(),
+        "the frame bytes are left out"
+    );
+    assert!(lines[1]["payload"].is_string(), "the old field stays");
     std::fs::remove_dir_all(dir).unwrap();
 }
