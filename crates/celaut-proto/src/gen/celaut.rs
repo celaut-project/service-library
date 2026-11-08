@@ -645,6 +645,42 @@ pub struct TokenMessage {
     #[prost(bool, tag = "3")]
     pub receipts: bool,
 }
+/// The first message of a ServiceTunnel to a descendant of an instance that the caller
+/// holds. The caller sends it in place of the TokenMessage. The node finds the
+/// descendant through the child_bound movements of the chains below the instance of
+/// token, as GetBalanceStatement does with instance_ref. The caller needs no token of
+/// the descendant, and the node gives no token. The descendant can be on another node.
+/// Then the node relays the bytes to that node, one hop at a time, each hop with the
+/// token that the node holds there. The descendant pays the traffic on the node that
+/// runs it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DescendantTunnel {
+    /// The token of an instance that the caller holds: the ancestor. It can be the token
+    /// of an instance that stopped, while the node keeps its row.
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    /// The descendant, by its instance_ref: blake2b-256 hex of
+    /// "celaut-ledger-instance:" followed by its token on the node that links it. The
+    /// instance_ref of the instance of token itself is also accepted.
+    #[prost(string, tag = "2")]
+    pub instance_ref: ::prost::alloc::string::String,
+    /// The internal port of the descendant, as a decimal number. It must be one of the
+    /// Instance.uri_slot.internal_port values of the descendant.
+    #[prost(string, tag = "3")]
+    pub slot: ::prost::alloc::string::String,
+    /// True to also get the checkpoints of the execution receipt, as ExecutionReceipt
+    /// at index 2 of the response. They name the execution by the instance_ref.
+    #[prost(bool, tag = "4")]
+    pub receipts: bool,
+    /// How many nodes the tunnel can still go into, with the receiver. A node that
+    /// relays to the next node sends one less. A node that must first find which of
+    /// its peers holds the descendant shares one less between them, in equal parts. A receiver that gets 0 refuses. A
+    /// receiver that gets 1 relays to no other node. If it is absent, the receiver uses
+    /// its own maximum (network.RECURSION_MAX_HOPS). A value above that maximum becomes
+    /// the maximum.
+    #[prost(uint32, optional, tag = "5")]
+    pub remaining_hops: ::core::option::Option<u32>,
+}
 /// The cost to run a service on the node. The node that answers sets it.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EstimatedCost {
@@ -753,7 +789,9 @@ pub struct Metrics {
     /// True if the instance is suspended: its virtual machine is stopped and the node
     /// keeps its disk, its address and its balance. The node does not charge an instance
     /// while it is suspended. A deposit that pays one maintenance period starts it again.
-    /// False for a client_id, and for an instance that runs.
+    /// False for a client_id, and for an instance that runs. Also false for a hibernated
+    /// instance: the node charges it for its disk and a deposit does not start it, so
+    /// whoever delegated it goes on charging for it.
     #[prost(bool, tag = "2")]
     pub suspended: bool,
 }
@@ -776,6 +814,25 @@ pub struct BalanceStatementRequest {
     /// returns more than its own limit in one answer.
     #[prost(uint64, tag = "3")]
     pub to_seq: u64,
+    /// The account of a descendant to read, by its instance_ref: the hash that the
+    /// movements of the account that links it carry (a child_bound). The node looks for
+    /// it below the account that token names (the caller's own account if token is
+    /// empty), through the child_bound movements, one level at a time. It answers
+    /// PERMISSION_DENIED if the account is not found there. The statement is of the
+    /// descendant, and can be of an instance that has stopped. The instance_ref of the
+    /// account that token names is also accepted: it reads that account, also when the
+    /// instance stopped. Empty reads the account that token names. A statement that
+    /// another node wrote comes with relayed set.
+    #[prost(string, tag = "4")]
+    pub instance_ref: ::prost::alloc::string::String,
+    /// How many nodes the read can still go into, with the receiver. It is used only
+    /// with instance_ref. A node that asks one peer for a descendant sends one less. A
+    /// node that asks more peers shares one less between them, in equal parts. A
+    /// receiver that gets 0 refuses. A receiver that gets 1 answers from its own chains
+    /// and asks no peer. If it is absent, the receiver uses its own maximum
+    /// (network.RECURSION_MAX_HOPS). A value above that maximum becomes the maximum.
+    #[prost(uint32, optional, tag = "5")]
+    pub remaining_hops: ::core::option::Option<u32>,
 }
 /// One movement of a balance.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -797,7 +854,8 @@ pub struct BalanceMovement {
     /// "debit" (the operator took MU), "start" (the initial_mu that the instance got),
     /// "build", "maintenance" (one period), "child_start" (the account paid the start of a child), "child_bound" (the
     /// child of a child_start exists; moves nothing), "top_up", "withdrawal", "refund"
-    /// (MU that goes back to the parent), "tunnel", "resource_change" or
+    /// (MU that goes back to the parent), "tunnel", "resource_change", "stop" (the
+    /// account stops; its last movement; moves nothing) or
     /// "statement_query". A reader treats a kind that it does not
     /// know as a charge that it did not cause.
     #[prost(string, tag = "5")]
@@ -813,10 +871,14 @@ pub struct BalanceMovement {
     /// is none. For a maintenance period: "seconds", and the resources that the node
     /// priced ("mem_limit", "disk_space", "cpu_period", "cpu_quota"). For a refund of a
     /// charge that was not used: "refunds_seq", the seq of that charge. For a
-    /// child_bound: "starts_seq", the seq of the child_start whose child it names. For a
+    /// child_bound: "starts_seq", the seq of the child_start whose child it names, and
+    /// "service_id", the service of the child, as the lowercase hexadecimal of its
+    /// content hash (absent in old rows). For a
     /// start: "execution_name", the name that the execution receipts of the instance
     /// carry. For a tunnel: "open" or "bytes", "execution_name", and "session", the
-    /// receipt stream of the tunnel when the caller asked for receipts.
+    /// receipt stream of the tunnel when the caller asked for receipts. For a stop:
+    /// "reason", the death reason of the instance, and "leftover", the MU that the
+    /// refund took out of the account.
     #[prost(string, tag = "7")]
     pub detail: ::prost::alloc::string::String,
     /// The hash of the movement before this one. For the first movement, the genesis
@@ -864,7 +926,10 @@ pub struct BalanceStatement {
     /// movement that it no longer has.
     #[prost(uint64, tag = "8")]
     pub oldest_seq: u64,
-    /// How long the node keeps movements, in days.
+    /// How long the node keeps the movements of a dead account, in days, after its last
+    /// movement. 0 means for ever, which is the default: the movements of an account that
+    /// lives, and of a dead account with anything alive below it, are never deleted. A
+    /// reader treats 0 as at least ledger.MIN_PEER_RETENTION_DAYS.
     #[prost(uint32, tag = "9")]
     pub retention_days: u32,
     /// When the node answered, in unix seconds, on the clock of the node.
@@ -875,6 +940,26 @@ pub struct BalanceStatement {
     /// without a valid signature is not valid.
     #[prost(string, tag = "11")]
     pub signature: ::prost::alloc::string::String,
+    /// True when the node that signs did not write the movements. It read the statement
+    /// of a descendant from the next node, checked the signature of that node, and
+    /// signs it again for its own caller. The digest covers it only when it is true.
+    #[prost(bool, tag = "12")]
+    pub relayed: bool,
+    /// In the answer to a read with instance_ref: the service of the instance that the
+    /// statement is about, as the lowercase hexadecimal of its content hash. The caller
+    /// can then know which service each descendant runs. Empty when the node does not
+    /// know it, and in the answer to a read without instance_ref. The digest covers it
+    /// only when it is not empty.
+    #[prost(string, tag = "13")]
+    pub service_id: ::prost::alloc::string::String,
+    /// In the answer to a read with instance_ref: the instance_ref of the request. The
+    /// node signs that the statement is the account of that descendant, so it cannot say
+    /// later that the statement was of another account. A reader refuses an answer to a
+    /// read with instance_ref that does not have the same instance_ref. A node that
+    /// relays sets the instance_ref that its own caller asked for. Empty in the answer to
+    /// a read without instance_ref. The digest covers it only when it is not empty.
+    #[prost(string, tag = "14")]
+    pub instance_ref: ::prost::alloc::string::String,
 }
 /// An execution receipt (docs/EXECUTION_RECEIPTS.md): a statement that the node signs
 /// about one execution that it runs. It gives a client evidence against the node. It is
@@ -899,6 +984,9 @@ pub struct ExecutionReceipt {
     /// The name of the execution: blake2b-256 hex of the UTF-8 bytes of the instance
     /// token followed by the 32 bytes of the public key (not its hexadecimal text). The
     /// client, who has the token, can calculate it. A receipt never contains the token.
+    /// In a DescendantTunnel stream, the name is blake2b-256 hex of the UTF-8 bytes of
+    /// "celaut-execution-ref:" and the instance_ref, followed by the 32 bytes of the
+    /// public key: the caller has the instance_ref and not the token.
     #[prost(string, tag = "3")]
     pub execution_name: ::prost::alloc::string::String,
     /// When the node signed, in unix seconds, on the clock of the node.
@@ -1186,8 +1274,9 @@ pub struct PoWRequired {
 /// example to tell that a problem occurred.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChatMessage {
-    /// The client_id of the sender on the node that receives the message. The node must
-    /// have a binding of this client to a peer. That peer is the sender.
+    /// The client_id of the sender on the node that receives the message. If the client
+    /// has a binding to a peer, that peer is the sender. If not, the sender is the client
+    /// itself and the node keeps the message in the thread of the client (GetChatThread).
     #[prost(string, tag = "1")]
     pub client_id: ::prost::alloc::string::String,
     /// The text of the message.
@@ -1203,6 +1292,42 @@ pub struct ChatMessage {
     /// the service, for a reader that does not know this field.
     #[prost(message, optional, tag = "4")]
     pub service: ::core::option::Option<Metadata>,
+}
+/// One message of the thread between a client and the operator of a node.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ChatEntry {
+    /// The position in the thread. The first message has sequence 1. The node gives
+    /// the sequence; it never changes and it grows by 1.
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    /// The time that the node stored the message, in Unix seconds.
+    #[prost(int64, tag = "2")]
+    pub ts: i64,
+    /// True if the operator wrote the message, false if the client did.
+    #[prost(bool, tag = "3")]
+    pub from_operator: bool,
+    /// The text of the message.
+    #[prost(string, tag = "4")]
+    pub body: ::prost::alloc::string::String,
+}
+/// The request of GetChatThread.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ChatThreadRequest {
+    /// Send only the messages with a sequence more than this. 0 sends the whole thread
+    /// (up to the limit of the node).
+    #[prost(uint64, tag = "1")]
+    pub after_sequence: u64,
+}
+/// The answer of GetChatThread.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChatThread {
+    /// The messages in order of sequence.
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<ChatEntry>,
+    /// The sequence of the last message of the thread, also if entries is empty or the
+    /// node cut it. 0 if the thread is empty.
+    #[prost(uint64, tag = "2")]
+    pub latest: u64,
 }
 /// The answer of Chat.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1290,9 +1415,22 @@ pub struct ModifyServiceSystemResourcesInput {
     /// The minimum resources. Not used now.
     #[prost(message, optional, tag = "1")]
     pub min_sysreq: ::core::option::Option<Sysresources>,
-    /// The resources that the instance asks for.
+    /// The resources that the instance asks for. A field that is not set keeps the value
+    /// of the instance. If the CPU (cpu_quota) or the memory (mem_limit) ends at 0, the
+    /// node hibernates the instance: it stops the virtual machine and keeps the disk, and
+    /// charges only for the disk. If the instance is hibernated and the CPU and the memory
+    /// both end above 0, the node starts it again from its entrypoint, on the same disk,
+    /// address and ports. A request that sets only one of them does not wake it. The node
+    /// refuses to hibernate an instance with a shared filesystem.
     #[prost(message, optional, tag = "2")]
     pub max_sysreq: ::core::option::Option<Sysresources>,
+    /// The instance token. Optional. If it is set, the node changes that instance, whoever
+    /// sends the request, and the instance that the token names pays for the call. If the
+    /// parent of the instance is a client, the request must also have that Client. If it
+    /// is not set, the node changes the local instance that sends the request, which it
+    /// finds by the address of the caller.
+    #[prost(string, tag = "3")]
+    pub service_token: ::prost::alloc::string::String,
 }
 /// The request of ModifyDeposit.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

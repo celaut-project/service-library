@@ -26,6 +26,8 @@ pub mod relay;
 pub mod resources;
 pub mod skills;
 pub mod skips;
+pub mod statement;
 pub mod tunnel;
+pub mod verifier;
 
 pub use error::Error;

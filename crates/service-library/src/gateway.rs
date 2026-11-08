@@ -16,12 +16,13 @@ use celaut_proto::celaut::service::Network;
 use celaut_proto::celaut::{
     Amount, ChatAck, ChatMessage, Client, Configuration, EstimatedCost, Metrics,
     ModifyDepositInput, ModifyDepositOutput, ModifyServiceSystemResourcesInput,
-    ModifyServiceSystemResourcesOutput, Refund, ServiceInstance, Sysresources, TokenMessage,
+    ModifyServiceSystemResourcesOutput, Peer, Refund, ServiceInstance, Sysresources, TokenMessage,
 };
 use prost::Message;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::error::is_unreachable;
+use crate::statement::{KeptHead, Rates, StatementError, StatementRequest, VerifiedStatement};
 use crate::Error;
 
 /// The type id of SHA3-256: the digest of the empty input.
@@ -126,6 +127,68 @@ impl Gateway {
             .await
             .map_err(|e| Self::failed("estimating the cost of a service", 1, e))?;
         find(&answer, "EstimatedCost")
+    }
+
+    /// `GetPeerInfo`: the identity (`public_key`), the addresses and the rates of the node.
+    /// It is free, and the node answers anyone. The `Peer` carries a signature that this
+    /// call does not check: the `public_key` is only what the node says about itself, so to
+    /// pin the identity give it to [`Gateway::with_peer_id`].
+    pub async fn peer_info(&self) -> Result<Peer, Error> {
+        // The call takes a `Client` at index 1 and a service has none: an empty one.
+        let part = Part::new(1, Client::default().encode_to_vec());
+        let answer = self
+            .call("GetPeerInfo", vec![part], &[1], CALL_TIMEOUT)
+            .await
+            .map_err(|e| Self::failed("reading the peer info of the node", 1, e))?;
+        find(&answer, "Peer")
+    }
+
+    /// `GetBalanceStatement`: read the signed movements of the account of an instance that
+    /// this service holds (`request.token`), or, with `request.instance_ref`, of a
+    /// descendant of it (nodo#631).
+    ///
+    /// A read costs MU and writes a `statement_query` movement on the node, so the caller
+    /// passes `max_mu`: the call sends nothing and gives [`StatementError::OverBudget`] when
+    /// [`StatementRequest::max_mu_needed`] is more than `max_mu`. It never repeats a read.
+    ///
+    /// `peer_id` is the identity that must have signed the statement, `rates` the rates of
+    /// the node ([`Rates::from_peer`]), `kept` the head of an earlier read of the same
+    /// account, and `now` the time of this service in Unix seconds. The answer is checked as
+    /// [`crate::statement::verify`] says. A service has no `Client`: the instance token
+    /// names the account. Use [`crate::verifier::Verifier`] to read and keep the state.
+    pub async fn balance_statement(
+        &self,
+        request: &StatementRequest,
+        peer_id: &str,
+        rates: &Rates,
+        max_mu: u128,
+        kept: Option<&KeptHead>,
+        now: i64,
+    ) -> Result<VerifiedStatement, StatementError> {
+        request.check()?;
+        if request.token.is_empty() {
+            return Err(StatementError::BadRequest(
+                "a service names an account by the token of an instance that it holds".into(),
+            ));
+        }
+        let needed = request.max_mu_needed(rates);
+        if needed > max_mu {
+            return Err(StatementError::OverBudget {
+                needed,
+                max: max_mu,
+            });
+        }
+        let answer = self
+            .call(
+                "GetBalanceStatement",
+                vec![Part::new(1, request.to_proto().encode_to_vec())],
+                &[1],
+                CALL_TIMEOUT,
+            )
+            .await
+            .map_err(|e| Self::failed("reading a balance statement", 1, e))?;
+        let statement = find(&answer, "BalanceStatement")?;
+        crate::statement::verify(request, peer_id, statement, kept, now)
     }
 
     /// `GetMetrics` of an instance: its balance in MU. No part means a balance of 0.
@@ -290,6 +353,8 @@ impl Gateway {
         let input = ModifyServiceSystemResourcesInput {
             min_sysreq: None,
             max_sysreq: Some(max),
+            // No token: the node changes the local instance that sends the request.
+            service_token: String::new(),
         };
         let answer = self
             .call(

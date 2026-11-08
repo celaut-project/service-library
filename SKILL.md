@@ -74,6 +74,25 @@ none). `receipt::verify` and `receipt::problems` check any receipt. A client tha
 `client_id` on another node must send the `Client` (`gateway::client_part`) on the calls that
 need it, and keeps that id as a master secret.
 
+**Checking what happened to an instance, and to its children.** A dependency can go away
+without you: the node can stop it, its balance can run out, or the instance that started it can
+die. The signed balance statements say which. `verifier::Verifier` reads the statement of an
+instance that you hold, and of its children and grandchildren (the `child_bound` movements of
+each account), and checks the signature of the node, the hash chain, the head and the balance
+(`statement::verify`). What it finds is in `InstanceReport::findings`: `StoppedWithoutUs` (the
+ledger ends with a stop that you did not ask for, with its reason), `StoppedWithMu` (it died with
+MU that nobody got, because its father was gone), `RefundMismatch` (the refund that `StopService`
+gave you is not in the ledger), `NotStopped`, `StatementRefused` (the node would not show it: it
+can hide a death), `InvalidStatement` (the node signed something wrong), `Gap`. **It is opt-in
+because a read costs MU**: build it with a budget (`VerifierConfig::with_budget(mu)`), and it
+never spends more; a budget of 0 reads nothing. `Verifier::connect` takes the rates and the key
+of the node from `GetPeerInfo`; give the gateway the `peer_id` (`Gateway::with_peer_id`) so the
+statements must be signed by that key (`Verifier::identity_pinned`). The pool tracks what it
+started and what it stopped: `DependencyManager::verify(&verifier)` reads them all and
+`spawn_verifier(verifier, interval)` does it in the background (the first pass at once), keeping
+the findings in `DependencyManager::findings`. `celaut verify --budget MU` does it for the
+instances of the pool; each run starts from the first movement.
+
 **Resources and networks.** `ConfigurationFile.initial_sysresources` gives the memory limit at
 the start (`NodeConfig::mem_limit`). To change it, `Gateway::modify_resources`: only a local
 instance may call it, the node takes a fee from the balance of the instance, and it answers
@@ -245,6 +264,12 @@ instance may use this call.
 - Tests against a real node: everything here is tested against a fake node and the vectors
   of nodo only. The skills registry was read from the public Explorer (7 skills at the time,
   one with 4 coverages and 5 benchmarks), but a service found there was never started.
+- The verifier (`verifier`, `celaut verify`) was tested against an in-process node that signs
+  its own ledgers, and the checks of `statement` against the vectors of chatui, which came from
+  a script that follows nodo and not from a real node. Reading the statement of an instance
+  from inside a real service, and the ancestors that a relay hides (`relayed`), were not tried.
+  `celaut verify` keeps no state between runs: each run reads from the first movement, within
+  its budget.
 - Publishing skills, coverages, benchmarks and results. The MCP server of the registry does it
   (`create_skill` and the others); this library only reads. The extended skills were checked
   against a fake Explorer and against the JS of the registry, but no skill of the public

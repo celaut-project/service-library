@@ -581,6 +581,37 @@ message TokenMessage {
     bool receipts = 3;
 }
 
+// The first message of a ServiceTunnel to a descendant of an instance that the caller
+// holds. The caller sends it in place of the TokenMessage. The node finds the
+// descendant through the child_bound movements of the chains below the instance of
+// token, as GetBalanceStatement does with instance_ref. The caller needs no token of
+// the descendant, and the node gives no token. The descendant can be on another node.
+// Then the node relays the bytes to that node, one hop at a time, each hop with the
+// token that the node holds there. The descendant pays the traffic on the node that
+// runs it.
+message DescendantTunnel {
+    // The token of an instance that the caller holds: the ancestor. It can be the token
+    // of an instance that stopped, while the node keeps its row.
+    string token = 1;
+    // The descendant, by its instance_ref: blake2b-256 hex of
+    // "celaut-ledger-instance:" followed by its token on the node that links it. The
+    // instance_ref of the instance of token itself is also accepted.
+    string instance_ref = 2;
+    // The internal port of the descendant, as a decimal number. It must be one of the
+    // Instance.uri_slot.internal_port values of the descendant.
+    string slot = 3;
+    // True to also get the checkpoints of the execution receipt, as ExecutionReceipt
+    // at index 2 of the response. They name the execution by the instance_ref.
+    bool receipts = 4;
+    // How many nodes the tunnel can still go into, with the receiver. A node that
+    // relays to the next node sends one less. A node that must first find which of
+    // its peers holds the descendant shares one less between them, in equal parts. A receiver that gets 0 refuses. A
+    // receiver that gets 1 relays to no other node. If it is absent, the receiver uses
+    // its own maximum (network.RECURSION_MAX_HOPS). A value above that maximum becomes
+    // the maximum.
+    optional uint32 remaining_hops = 5;
+}
+
 // The cost to run a service on the node. The node that answers sets it.
 message EstimatedCost {
     // The least Configuration.initial_mu with which the node starts the service, in MU.
@@ -678,7 +709,9 @@ message Metrics {
     // True if the instance is suspended: its virtual machine is stopped and the node
     // keeps its disk, its address and its balance. The node does not charge an instance
     // while it is suspended. A deposit that pays one maintenance period starts it again.
-    // False for a client_id, and for an instance that runs.
+    // False for a client_id, and for an instance that runs. Also false for a hibernated
+    // instance: the node charges it for its disk and a deposit does not start it, so
+    // whoever delegated it goes on charging for it.
     bool suspended = 2;
 }
 
@@ -697,6 +730,23 @@ message BalanceStatementRequest {
     // The last movement asked for, included. 0 asks up to the head. The node never
     // returns more than its own limit in one answer.
     uint64 to_seq = 3;
+    // The account of a descendant to read, by its instance_ref: the hash that the
+    // movements of the account that links it carry (a child_bound). The node looks for
+    // it below the account that token names (the caller's own account if token is
+    // empty), through the child_bound movements, one level at a time. It answers
+    // PERMISSION_DENIED if the account is not found there. The statement is of the
+    // descendant, and can be of an instance that has stopped. The instance_ref of the
+    // account that token names is also accepted: it reads that account, also when the
+    // instance stopped. Empty reads the account that token names. A statement that
+    // another node wrote comes with relayed set.
+    string instance_ref = 4;
+    // How many nodes the read can still go into, with the receiver. It is used only
+    // with instance_ref. A node that asks one peer for a descendant sends one less. A
+    // node that asks more peers shares one less between them, in equal parts. A
+    // receiver that gets 0 refuses. A receiver that gets 1 answers from its own chains
+    // and asks no peer. If it is absent, the receiver uses its own maximum
+    // (network.RECURSION_MAX_HOPS). A value above that maximum becomes the maximum.
+    optional uint32 remaining_hops = 5;
 }
 
 // One movement of a balance.
@@ -714,7 +764,8 @@ message BalanceMovement {
     // "debit" (the operator took MU), "start" (the initial_mu that the instance got),
     // "build", "maintenance" (one period), "child_start" (the account paid the start of a child), "child_bound" (the
     // child of a child_start exists; moves nothing), "top_up", "withdrawal", "refund"
-    // (MU that goes back to the parent), "tunnel", "resource_change" or
+    // (MU that goes back to the parent), "tunnel", "resource_change", "stop" (the
+    // account stops; its last movement; moves nothing) or
     // "statement_query". A reader treats a kind that it does not
     // know as a charge that it did not cause.
     string kind = 5;
@@ -728,10 +779,14 @@ message BalanceMovement {
     // is none. For a maintenance period: "seconds", and the resources that the node
     // priced ("mem_limit", "disk_space", "cpu_period", "cpu_quota"). For a refund of a
     // charge that was not used: "refunds_seq", the seq of that charge. For a
-    // child_bound: "starts_seq", the seq of the child_start whose child it names. For a
+    // child_bound: "starts_seq", the seq of the child_start whose child it names, and
+    // "service_id", the service of the child, as the lowercase hexadecimal of its
+    // content hash (absent in old rows). For a
     // start: "execution_name", the name that the execution receipts of the instance
     // carry. For a tunnel: "open" or "bytes", "execution_name", and "session", the
-    // receipt stream of the tunnel when the caller asked for receipts.
+    // receipt stream of the tunnel when the caller asked for receipts. For a stop:
+    // "reason", the death reason of the instance, and "leftover", the MU that the
+    // refund took out of the account.
     string detail = 7;
     // The hash of the movement before this one. For the first movement, the genesis
     // hash of the account: blake2b-256 hex of "celaut-balance-genesis:" followed by the
@@ -769,7 +824,10 @@ message BalanceStatement {
     // passed its retention, and the first movement it holds hangs from the hash of a
     // movement that it no longer has.
     uint64 oldest_seq = 8;
-    // How long the node keeps movements, in days.
+    // How long the node keeps the movements of a dead account, in days, after its last
+    // movement. 0 means for ever, which is the default: the movements of an account that
+    // lives, and of a dead account with anything alive below it, are never deleted. A
+    // reader treats 0 as at least ledger.MIN_PEER_RETENTION_DAYS.
     uint32 retention_days = 9;
     // When the node answered, in unix seconds, on the clock of the node.
     int64 ts = 10;
@@ -777,6 +835,23 @@ message BalanceStatement {
     // hexadecimal. The celaut-gateway layer gives the text that it signs. A statement
     // without a valid signature is not valid.
     string signature = 11;
+    // True when the node that signs did not write the movements. It read the statement
+    // of a descendant from the next node, checked the signature of that node, and
+    // signs it again for its own caller. The digest covers it only when it is true.
+    bool relayed = 12;
+    // In the answer to a read with instance_ref: the service of the instance that the
+    // statement is about, as the lowercase hexadecimal of its content hash. The caller
+    // can then know which service each descendant runs. Empty when the node does not
+    // know it, and in the answer to a read without instance_ref. The digest covers it
+    // only when it is not empty.
+    string service_id = 13;
+    // In the answer to a read with instance_ref: the instance_ref of the request. The
+    // node signs that the statement is the account of that descendant, so it cannot say
+    // later that the statement was of another account. A reader refuses an answer to a
+    // read with instance_ref that does not have the same instance_ref. A node that
+    // relays sets the instance_ref that its own caller asked for. Empty in the answer to
+    // a read without instance_ref. The digest covers it only when it is not empty.
+    string instance_ref = 14;
 }
 
 // An execution receipt (docs/EXECUTION_RECEIPTS.md): a statement that the node signs
@@ -799,6 +874,9 @@ message ExecutionReceipt {
     // The name of the execution: blake2b-256 hex of the UTF-8 bytes of the instance
     // token followed by the 32 bytes of the public key (not its hexadecimal text). The
     // client, who has the token, can calculate it. A receipt never contains the token.
+    // In a DescendantTunnel stream, the name is blake2b-256 hex of the UTF-8 bytes of
+    // "celaut-execution-ref:" and the instance_ref, followed by the 32 bytes of the
+    // public key: the caller has the instance_ref and not the token.
     string execution_name = 3;
     // When the node signed, in unix seconds, on the clock of the node.
     int64 ts = 4;
@@ -1052,8 +1130,9 @@ message PoWRequired {
 // A text message from the operator of one node to the operator of another node, for
 // example to tell that a problem occurred.
 message ChatMessage {
-    // The client_id of the sender on the node that receives the message. The node must
-    // have a binding of this client to a peer. That peer is the sender.
+    // The client_id of the sender on the node that receives the message. If the client
+    // has a binding to a peer, that peer is the sender. If not, the sender is the client
+    // itself and the node keeps the message in the thread of the client (GetChatThread).
     string client_id = 1;
     // The text of the message.
     string body = 2;
@@ -1065,6 +1144,35 @@ message ChatMessage {
     // The Metadata of a service that the sender shares. Optional. The body also names
     // the service, for a reader that does not know this field.
     optional Metadata service = 4;
+}
+
+// One message of the thread between a client and the operator of a node.
+message ChatEntry {
+    // The position in the thread. The first message has sequence 1. The node gives
+    // the sequence; it never changes and it grows by 1.
+    uint64 sequence = 1;
+    // The time that the node stored the message, in Unix seconds.
+    int64 ts = 2;
+    // True if the operator wrote the message, false if the client did.
+    bool from_operator = 3;
+    // The text of the message.
+    string body = 4;
+}
+
+// The request of GetChatThread.
+message ChatThreadRequest {
+    // Send only the messages with a sequence more than this. 0 sends the whole thread
+    // (up to the limit of the node).
+    uint64 after_sequence = 1;
+}
+
+// The answer of GetChatThread.
+message ChatThread {
+    // The messages in order of sequence.
+    repeated ChatEntry entries = 1;
+    // The sequence of the last message of the thread, also if entries is empty or the
+    // node cut it. 0 if the thread is empty.
+    uint64 latest = 2;
 }
 
 // The answer of Chat.
@@ -1144,8 +1252,20 @@ message ModifyServiceSystemResourcesOutput {
 message ModifyServiceSystemResourcesInput {
     // The minimum resources. Not used now.
     Sysresources min_sysreq = 1;
-    // The resources that the instance asks for.
+    // The resources that the instance asks for. A field that is not set keeps the value
+    // of the instance. If the CPU (cpu_quota) or the memory (mem_limit) ends at 0, the
+    // node hibernates the instance: it stops the virtual machine and keeps the disk, and
+    // charges only for the disk. If the instance is hibernated and the CPU and the memory
+    // both end above 0, the node starts it again from its entrypoint, on the same disk,
+    // address and ports. A request that sets only one of them does not wake it. The node
+    // refuses to hibernate an instance with a shared filesystem.
     Sysresources max_sysreq = 2;
+    // The instance token. Optional. If it is set, the node changes that instance, whoever
+    // sends the request, and the instance that the token names pays for the call. If the
+    // parent of the instance is a client, the request must also have that Client. If it
+    // is not set, the node changes the local instance that sends the request, which it
+    // finds by the address of the caller.
+    string service_token = 3;
 }
 
 // The request of ModifyDeposit.
@@ -1388,9 +1508,12 @@ service Gateway {
     // and the amount. The node examines the ledger. Then it adds the amount to the
     // client that got that deposit token. The node accepts each deposit token one time.
     rpc Payable(stream buffer.Buffer) returns (stream buffer.Buffer) {}
-    // Changes the resource limits of an instance. Only a local instance of the node can
-    // call it. The node identifies the instance by its address. The node takes a fee
-    // from the balance of the instance. It returns the new resources and the balance.
+    // Changes the resource limits of an instance. A local instance of the node can call
+    // it for itself: the node identifies it by its address. Anyone can call it for another
+    // instance with its service_token (and the Client of its parent, if the parent is a
+    // client). Resources of 0 hibernate the instance, and resources above 0 wake it (see
+    // ModifyServiceSystemResourcesInput). The node takes a fee from the balance of the
+    // instance that changes. It returns the new resources and the balance.
     rpc ModifyServiceSystemResources(stream buffer.Buffer) returns (stream buffer.Buffer) {}
     // Takes the same objects as StartService. Returns the cost to run the service on
     // this node, and starts nothing. A node that cannot run the service now refuses
@@ -1410,7 +1533,8 @@ service Gateway {
     // the answer. The balance of a client is not available with an instance token.
     rpc GetClientMetrics(stream buffer.Buffer) returns (stream buffer.Buffer) {}
     // Takes a BalanceStatementRequest and returns a BalanceStatement: the movements of
-    // the balance of the caller, or of a child of the caller, signed by the node. The
+    // the balance of the caller, or of a child of the caller, or, with instance_ref, of
+    // a descendant of one of them, signed by the node. The
     // caller pays for it: a fixed part and a part for each movement returned (the
     // rates "statement_query_mu" and "statement_row_mu"). The node writes the charge
     // as a "statement_query" movement before it answers. The node refuses with a status
@@ -1426,12 +1550,25 @@ service Gateway {
     // For a UDP slot, each message is one datagram. The node takes the traffic cost
     // from the balance of the instance. If the TokenMessage has receipts, the node also
     // sends signed checkpoints of the execution receipt at index 2, and a "close"
-    // checkpoint when the stream stops normally.
+    // checkpoint when the stream stops normally. A caller that holds the token of an
+    // ancestor sends a DescendantTunnel at index 2 in place of the TokenMessage. The
+    // node then opens the stream to the descendant, or relays it to the next node.
+    // The node refuses with a status code: PERMISSION_DENIED when no chain below the
+    // token links the descendant, RESOURCE_EXHAUSTED when the instance cannot pay or
+    // the node has no traffic allowance left, UNAVAILABLE when the descendant does not
+    // answer or is not alive, and INVALID_ARGUMENT for a request that is not correct.
+    // When a node below refuses after the stream started, the stream stops with no
+    // more bytes.
     rpc ServiceTunnel(stream buffer.Buffer) returns (stream buffer.Buffer) {}
     // Takes an ObserveRequest and returns a stream of ObserveEvent. If the observation
     // starts, the first event is a session event. If not, the stream has only one
     // notice that tells why. The stream stops when the instance stops.
     rpc Observe(stream buffer.Buffer) returns (stream buffer.Buffer) {}
-    // Sends a ChatMessage to the operator of the node. The node returns a ChatAck.
+    // Sends a ChatMessage to the operator of the node. The node returns a ChatAck. The
+    // client_id is enough; a binding to a peer is optional (see ChatMessage).
     rpc Chat(stream buffer.Buffer) returns (stream buffer.Buffer) {}
+    // Takes a Client (index 2) and a ChatThreadRequest (index 1). Returns the ChatThread
+    // of that client: the messages that it sent with Chat and the answers of the
+    // operator. It is free. A node gives only the thread of the client in the request.
+    rpc GetChatThread(stream buffer.Buffer) returns (stream buffer.Buffer) {}
 }

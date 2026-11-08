@@ -22,6 +22,7 @@ use service_library::package::{self, PackageInfo};
 use service_library::packer::Packer;
 use service_library::resources::Resizer;
 use service_library::skills::Skills;
+use service_library::verifier::{Expectation, Verifier, VerifierConfig, VerifierError};
 use service_library::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -45,6 +46,11 @@ Commands:
                                stop the idle instances that are old or broken
   shutdown                     stop every instance of the pool
   metrics   <lease>            the balance of the instance
+  verify    --budget MU [<lease>] [--depth N (2)]
+                               read the signed statements of the instances of the pool and of
+                               their children and grandchildren, and say what is wrong: an
+                               instance that the node stopped, MU kept, a bad statement. A read
+                               costs MU: it never reads more than the budget
   pack      <lease> <project.zip> --out FILE [--wait SECS (60)] [--uri IP:PORT]
                                pack a project with the packer service (the instance of
                                <lease>, or --uri): {service, path, size}
@@ -767,6 +773,50 @@ async fn run(args: Args) -> Res<Value> {
             let token = ctx.token(args.lease()?)?;
             let m = ctx.gateway()?.metrics(&token).await?;
             Ok(json!({ "balance_mu": mu(m.balance.as_ref())?, "suspended": m.suspended }))
+        }
+        "verify" => {
+            let budget = args.number::<u128>("budget")?.ok_or_else(|| {
+                usage("verify needs --budget MU: a read of a statement costs MU".to_string())
+            })?;
+            let mut config = VerifierConfig::with_budget(budget);
+            if let Some(depth) = args.number::<u32>("depth")? {
+                config.max_depth = depth;
+            }
+            let only = match args.words.get(1) {
+                Some(_) => Some(args.lease()?),
+                None => None,
+            };
+            let instances: Vec<(u64, String)> = ctx.pool(|p| {
+                p.instances
+                    .iter()
+                    .filter(|i| only.is_none_or(|id| i.id == id))
+                    .map(|i| (i.id, i.token.clone()))
+                    .collect()
+            })?;
+            if let Some(id) = only {
+                if instances.is_empty() {
+                    return Err(Fail::Other(format!("no lease {id}")));
+                }
+            }
+            let verifier =
+                Verifier::connect(ctx.gateway()?, config)
+                    .await
+                    .map_err(|e| match e {
+                        VerifierError::Node(e) => Fail::Library(e),
+                        other => Fail::Other(other.to_string()),
+                    })?;
+            let mut reports = Vec::new();
+            for (lease, token) in instances {
+                let report = verifier.check(&token, Expectation::default()).await;
+                reports.push(json!({ "lease": lease, "report": report }));
+            }
+            let (spent, left) = verifier.budget();
+            Ok(json!({
+                "identity_pinned": verifier.identity_pinned(),
+                "spent_mu": spent,
+                "budget_left_mu": left,
+                "instances": reports,
+            }))
         }
         "deposit" => {
             let token = ctx.token(args.lease()?)?;

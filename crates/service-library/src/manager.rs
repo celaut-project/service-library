@@ -17,6 +17,7 @@ use tokio::time::Instant;
 use crate::config::grpc_uri;
 use crate::gateway::Node;
 use crate::instance::ServiceInstance;
+use crate::verifier::{Expectation, Finding, InstanceReport, Verifier};
 use crate::Error;
 
 /// When the pool gives an instance up.
@@ -113,12 +114,51 @@ struct Pool {
     idle: VecDeque<ServiceInstance>,
 }
 
+/// How many findings of the verifier the manager keeps ([`DependencyManager::findings`]).
+const FINDINGS_KEPT: usize = 100;
+
+/// What the pool did with an instance that it started, so the verifier can tell a stop that
+/// the service asked for from one that it did not.
+struct Tracked {
+    stopped: Option<StoppedByUs>,
+}
+
+#[derive(Clone, Copy)]
+struct StoppedByUs {
+    /// The MU that the node said it gave back.
+    refund_mu: u128,
+    at: Instant,
+}
+
+/// What one pass of [`DependencyManager::verify`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct VerificationReport {
+    /// One report for each instance that the pool tracks, with its children and grandchildren.
+    pub instances: Vec<InstanceReport>,
+    /// The MU of the budget that the verifier has left after the pass.
+    pub budget_left_mu: u128,
+}
+
+impl VerificationReport {
+    /// Every finding of the pass.
+    pub fn findings(&self) -> Vec<Finding> {
+        self.instances
+            .iter()
+            .flat_map(|i| i.all_findings().into_iter().cloned())
+            .collect()
+    }
+}
+
 /// The pool of every dependency of the service.
 pub struct DependencyManager<N: Node> {
     node: N,
     limits: Limits,
     receipts: ReceiptCheck,
     pools: Mutex<HashMap<PoolKey, Pool>>,
+    /// Every instance that the pool started and whose end the verifier has not settled,
+    /// by token. Only the manager holds the tokens.
+    tracked: Mutex<HashMap<String, Tracked>>,
+    findings: Mutex<VecDeque<Finding>>,
 }
 
 impl<N: Node> DependencyManager<N> {
@@ -134,6 +174,8 @@ impl<N: Node> DependencyManager<N> {
             limits,
             receipts,
             pools: Mutex::new(HashMap::new()),
+            tracked: Mutex::new(HashMap::new()),
+            findings: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -317,7 +359,7 @@ impl<N: Node> DependencyManager<N> {
                 let zombie =
                     instance.is_zombie(limits.pass_timeout_times, limits.failed_attempts, alive);
                 if idle_too_long || zombie {
-                    match self.node.stop(&instance.token).await {
+                    match self.stop_instance(&instance.token).await {
                         Ok(_) => report.stopped += 1,
                         Err(_) => report.leaked.push(instance.token),
                     }
@@ -361,12 +403,120 @@ impl<N: Node> DependencyManager<N> {
         };
         let mut report = MaintenanceReport::default();
         for instance in taken {
-            match self.node.stop(&instance.token).await {
+            match self.stop_instance(&instance.token).await {
                 Ok(_) => report.stopped += 1,
                 Err(_) => report.leaked.push(instance.token),
             }
         }
         report
+    }
+
+    /// Remember an instance that the pool started.
+    fn track(&self, token: &str) {
+        self.tracked
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), Tracked { stopped: None });
+    }
+
+    /// Stop an instance through the node, and remember that the service asked for it and
+    /// how many MU the node said it gave back. A failed stop remembers nothing: the
+    /// instance may still run.
+    async fn stop_instance(&self, token: &str) -> Result<u128, Error> {
+        let refund_mu = self.node.stop(token).await?;
+        if let Some(t) = self.tracked.lock().unwrap().get_mut(token) {
+            t.stopped = Some(StoppedByUs {
+                refund_mu,
+                at: Instant::now(),
+            });
+        }
+        Ok(refund_mu)
+    }
+
+    /// How many instances the pool tracks for the verifier: the ones that it started and
+    /// whose end no pass of [`DependencyManager::verify`] has settled.
+    pub fn tracked_count(&self) -> usize {
+        self.tracked.lock().unwrap().len()
+    }
+
+    /// The findings of the passes of [`DependencyManager::verify`], the last 100, oldest
+    /// first. A finding is kept once.
+    pub fn findings(&self) -> Vec<Finding> {
+        self.findings.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// One pass of the verifier over every instance that the pool started: the ones that
+    /// run, the ones in a lease and the ones that the service stopped and whose stop was
+    /// not settled yet. It reads the signed statement of each, and of its children and
+    /// grandchildren, as the verifier's budget allows ([`crate::verifier`]).
+    ///
+    /// An instance that the service stopped, whose ledger shows the `stop` and no finding,
+    /// is settled: the pool forgets it, so it costs no more reads. One with a finding, or
+    /// whose ledger does not show the stop yet, is read again in the next pass. Every finding
+    /// is also in [`DependencyManager::findings`].
+    pub async fn verify(&self, verifier: &Verifier) -> VerificationReport {
+        let todo: Vec<(String, Expectation)> = {
+            let tracked = self.tracked.lock().unwrap();
+            tracked
+                .iter()
+                .map(|(token, t)| {
+                    let expected = match &t.stopped {
+                        Some(s) => Expectation {
+                            stopped_by_us: true,
+                            refund_claimed_mu: Some(s.refund_mu),
+                            stopped_secs_ago: s.at.elapsed().as_secs(),
+                        },
+                        None => Expectation::default(),
+                    };
+                    (token.clone(), expected)
+                })
+                .collect()
+        };
+        let mut report = VerificationReport::default();
+        for (token, expected) in todo {
+            let instance = verifier.check(&token, expected).await;
+            let settled = expected.stopped_by_us
+                && matches!(
+                    instance.state,
+                    crate::verifier::AccountState::Stopped { .. }
+                )
+                && instance.all_findings().is_empty();
+            if settled {
+                self.tracked.lock().unwrap().remove(&token);
+            }
+            report.instances.push(instance);
+        }
+        report.budget_left_mu = verifier.budget().1;
+        {
+            let mut log = self.findings.lock().unwrap();
+            for finding in report.findings() {
+                if !log.contains(&finding) {
+                    if log.len() >= FINDINGS_KEPT {
+                        log.pop_front();
+                    }
+                    log.push_back(finding);
+                }
+            }
+        }
+        report
+    }
+
+    /// Run [`DependencyManager::verify`] every `interval` until the task is dropped or
+    /// aborted. The passes spend the budget of `verifier`, and nothing else: when it is
+    /// used up, the passes read nothing and say so in the findings
+    /// ([`Finding::BudgetExhausted`]). The first pass runs at once, not after `interval`.
+    pub fn spawn_verifier(
+        self: &Arc<Self>,
+        verifier: Arc<Verifier>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            loop {
+                manager.verify(&verifier).await;
+                tokio::time::sleep(interval).await;
+            }
+        })
     }
 
     fn check_receipt(
@@ -469,9 +619,10 @@ impl<N: Node> ServiceHandle<N> {
                     .await?
             }
         };
+        self.manager.track(&started.token);
         if let Err(e) = self.manager.check_receipt(&started, hash, configuration) {
             // An instance that the service does not trust must not stay on the node.
-            let _ = self.manager.node.stop(&started.token).await;
+            let _ = self.manager.stop_instance(&started.token).await;
             return Err(e);
         }
         let uri = started
@@ -483,7 +634,7 @@ impl<N: Node> ServiceHandle<N> {
             Ok(uri) => Ok(ServiceInstance::new(uri, started.token)),
             Err(e) => {
                 // An instance that the service cannot use must not stay on the node.
-                let _ = self.manager.node.stop(&started.token).await;
+                let _ = self.manager.stop_instance(&started.token).await;
                 Err(e)
             }
         }
@@ -631,7 +782,7 @@ impl<N: Node> Lease<N> {
     /// know is broken. If the stop fails the error says that the instance may still run.
     pub async fn stop(mut self) -> Result<u128, Error> {
         let instance = self.instance.take().expect("a lease holds its instance");
-        self.manager.node.stop(&instance.token).await
+        self.manager.stop_instance(&instance.token).await
     }
 }
 

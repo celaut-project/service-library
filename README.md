@@ -22,6 +22,7 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::skills` | A reader of the [skills registry](https://github.com/celaut-project/skills) (problems on Ergo, with the services that cover them and their benchmarks): `load_skills`, `load_coverages`, `load_benchmarks`, `load_results`, `load_skill_tree`, `service_data`, `service_metadata`. The same queries as its MCP server, read from an Ergo Explorer; `https` needs the feature `tls`. Read only. Tested against an in-process Explorer and read once from the public one. `celaut skills`, `skill`, `covering` and `service-info` are the commands. |
 | `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
 | `service-library::relay`, `skips`, `counter` | Sends a service to the node with an early answer: a node that has it stops the transfer, and a node that holds some blocks makes the library skip them. Ported from chatui with its tests against an in-process node. |
+| `service-library::statement`, `verifier` | The signed balance statements of nodo (nodo#631), ported from chatui with its vectors: `Gateway::balance_statement` reads the account of an instance or of a descendant, within a budget, and `statement::verify` checks the signature, the hash chain, the head and the balance. `Verifier` is the optional verifier: it reads the instances of the service and their children and grandchildren and reports a stop that the service did not ask for, MU kept, a refund that is not in the ledger, a refused or bad statement. A read costs MU, so it has a budget. `DependencyManager::verify` and `spawn_verifier` run it over the pool. `celaut verify` is the command. |
 | `service-library::receipt` | The check of execution receipts, ported from chatui with the vectors of nodo (`check_start` for the start receipt). |
 | `crates/celaut-cli` | `celaut`: the library as a command, for a service in any language (see below). |
 | `SKILL.md` | What an AI agent that runs as a service has to know, and what it can leave out. It includes how to pack a service with the packer service (there is no `Pack` call in the gateway). |
@@ -53,7 +54,7 @@ celaut shutdown                      # stop every instance, when the service end
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
-`metrics`, `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
+`metrics`, `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.

@@ -13,11 +13,13 @@ use bee_rpc::frame::{serialize_part, ParseOptions, Parser, Part};
 use celaut_proto::celaut::instance::{Uri, UriSlot};
 use celaut_proto::celaut::service::{api::Slot, Api};
 use celaut_proto::celaut::{
-    configuration_file::NetworkResolution, service::Network, Amount, ConfigurationFile, Instance,
-    Metrics, Refund, ServiceInstance, Sysresources,
+    configuration_file::NetworkResolution, service::Network, Amount, AmountKeyValue,
+    BalanceMovement, BalanceStatement, BalanceStatementRequest, ConfigurationFile, Instance,
+    Metrics, Peer, Refund, ServiceInstance, Sysresources,
 };
 use prost::Message;
 use serde_json::Value;
+use service_library::statement::{account_ref, genesis_hash, movement_hash, sign_with_seed};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tokio_stream::Stream;
@@ -25,6 +27,12 @@ use tonic::codegen::{http, Body, BoxFuture, Service, StdError};
 use tonic::{Status, Streaming};
 
 type Reply = Pin<Box<dyn Stream<Item = Result<Buffer, Status>> + Send>>;
+
+const SEED: [u8; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+const PEER_ID: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
 
 #[derive(Default)]
 struct Counts {
@@ -123,6 +131,65 @@ impl tonic::server::StreamingService<Buffer> for Method {
                         peer_instances: vec![member],
                     }
                     .encode_to_vec()
+                }
+                "/celaut.Gateway/GetPeerInfo" => {
+                    let rate = |key: &str, n: &str| AmountKeyValue {
+                        key: key.into(),
+                        value: Some(Amount { n: n.into() }),
+                    };
+                    Peer {
+                        public_key: PEER_ID.into(),
+                        mu_per_call: vec![
+                            rate("statement_query_mu", "100"),
+                            rate("statement_row_mu", "1"),
+                        ],
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                }
+                "/celaut.Gateway/GetBalanceStatement" => {
+                    let mut parser = Parser::new(ParseOptions::accepting([1]));
+                    let part = parser
+                        .push(first.unwrap().unwrap())
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap();
+                    let request = BalanceStatementRequest::decode(part.data.as_slice()).unwrap();
+                    // The account of every instance: one credit of 42 MU, signed by the node.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    let account = account_ref(&request.token);
+                    let row = BalanceMovement {
+                        seq: 1,
+                        ts: now - 10,
+                        amount: mu(42),
+                        balance_after: mu(42),
+                        kind: "credit".into(),
+                        instance_ref: String::new(),
+                        detail: String::new(),
+                        prev_hash: genesis_hash(&account),
+                    };
+                    let mut statement = BalanceStatement {
+                        account_ref: account,
+                        from_seq: request.from_seq,
+                        to_seq: request.to_seq,
+                        head_seq: 1,
+                        head_hash: movement_hash(&row),
+                        movements: if request.from_seq == 1 {
+                            vec![row]
+                        } else {
+                            vec![]
+                        },
+                        balance: mu(42),
+                        oldest_seq: 1,
+                        ts: now,
+                        ..Default::default()
+                    };
+                    sign_with_seed(&mut statement, &SEED).unwrap();
+                    statement.encode_to_vec()
                 }
                 "/celaut.Gateway/StartService" => {
                     let n = counts.started.fetch_add(1, Ordering::SeqCst);
@@ -427,5 +494,60 @@ async fn config_keeps_every_slot_of_a_member_that_has_no_grpc_port() {
         network["members"][0]["slots"][0]["uris"][0],
         "10.0.0.9:5432"
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_reads_the_signed_statement_of_the_instances_of_the_pool() {
+    let (_, dir) = node().await;
+    let dep = ["--service", SERVICE, "--root", "/nonexistent"];
+    let (_, first) = celaut(&dir, &[&["acquire"][..], &dep].concat()).await;
+    let lease = first["lease"].to_string();
+
+    let (code, report) = celaut(&dir, &["verify", "--budget", "100000"]).await;
+
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["identity_pinned"], false);
+    let instance = &report["instances"][0];
+    assert_eq!(instance["lease"].to_string(), lease);
+    assert_eq!(instance["report"]["state"]["state"], "alive");
+    assert_eq!(instance["report"]["balance_mu"], 42);
+    assert_eq!(instance["report"]["findings"].as_array().unwrap().len(), 0);
+    assert_eq!(instance["report"]["depth"], 0);
+    let spent = report["spent_mu"].as_u64().unwrap();
+    assert!(spent > 0 && spent + report["budget_left_mu"].as_u64().unwrap() == 100000);
+
+    // One lease only, and the pinned identity.
+    let (code, one) = celaut(
+        &dir,
+        &["--peer-id", PEER_ID, "verify", "--budget", "100000", &lease],
+    )
+    .await;
+    assert_eq!(code, 0, "{one}");
+    assert_eq!(one["identity_pinned"], true);
+    assert_eq!(one["instances"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_reads_nothing_beyond_its_budget_and_needs_one() {
+    let (_, dir) = node().await;
+    let dep = ["--service", SERVICE, "--root", "/nonexistent"];
+    celaut(&dir, &[&["acquire"][..], &dep].concat()).await;
+
+    let (code, error) = celaut(&dir, &["verify"]).await;
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["kind"], "usage");
+
+    let (code, report) = celaut(&dir, &["verify", "--budget", "0"]).await;
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["spent_mu"], 0);
+    assert_eq!(
+        report["instances"][0]["report"]["findings"][0]["kind"],
+        "budget_exhausted"
+    );
+
+    let (code, error) = celaut(&dir, &["verify", "--budget", "10", "99"]).await;
+    assert_eq!(code, 1, "{error}");
     std::fs::remove_dir_all(dir).unwrap();
 }
