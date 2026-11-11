@@ -688,6 +688,7 @@ dependencies = [
  "blake2",
  "celaut-proto",
  "hex",
+ "libc",
  "prost",
  "ring",
  "rustls",
