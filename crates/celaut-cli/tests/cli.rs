@@ -630,3 +630,167 @@ async fn observe_gives_the_fields_of_each_event_as_json() {
     assert!(lines[1]["payload"].is_string(), "the old field stays");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A file that stands for the device of the notice, with `lines` in it.
+fn device(dir: &Path, lines: &str) -> PathBuf {
+    let path = dir.join("hvc0");
+    std::fs::write(&path, lines).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_gives_each_line_of_the_node_as_json() {
+    let (_, dir) = node().await;
+    let path = device(
+        &dir,
+        &format!("garbage\nSTOP {}\nHIBERNATE 1\n", now_secs() + 30),
+    );
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_celaut"))
+        .arg("--config")
+        .arg(dir.join("__config__"))
+        .args(["notice", "--device"])
+        .arg(&path)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "one JSON for each notice, and not for garbage"
+    );
+    assert_eq!(lines[0]["verb"], "stop");
+    assert!(lines[0]["remaining_secs"].as_u64().unwrap() <= 30);
+    assert_eq!(lines[1]["verb"], "hibernate");
+    assert_eq!(lines[1]["deadline"], 1);
+    assert_eq!(lines[1]["remaining_secs"], 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_once_ends_after_the_first() {
+    let (_, dir) = node().await;
+    let path = device(&dir, &format!("STOP {}\nSTOP 2\n", now_secs() + 30));
+    let (code, line) = celaut(
+        &dir,
+        &["notice", "--once", "--device", path.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(code, 0, "{line}");
+    assert_eq!(line["verb"], "stop");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_shutdown_stops_the_instances_of_the_pool_within_the_time_of_the_notice() {
+    let (counts, dir) = node().await;
+    for env in ["A=1", "A=2"] {
+        let (code, _) = celaut(
+            &dir,
+            &[
+                "acquire",
+                "--service",
+                SERVICE,
+                "--root",
+                "/x",
+                "--env",
+                env,
+            ],
+        )
+        .await;
+        assert_eq!(code, 0);
+    }
+    let path = device(&dir, &format!("STOP {}\nSTOP 2\n", now_secs() + 60));
+    let (code, line) = celaut(
+        &dir,
+        &["notice", "--shutdown", "--device", path.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(code, 0, "{line}");
+    assert_eq!(line["verb"], "stop");
+    assert_eq!(line["stopped"], 2);
+    assert_eq!(line["leaked"], 0);
+    assert!(line.get("timed_out").is_none());
+    assert_eq!(counts.stopped.load(Ordering::SeqCst), 2);
+    let (_, list) = celaut(&dir, &["list"]).await;
+    assert!(list["instances"].as_array().unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_shutdown_with_no_time_left_keeps_the_instances_in_the_pool() {
+    let (_, dir) = node().await;
+    let (code, _) = celaut(&dir, &["acquire", "--service", SERVICE, "--root", "/x"]).await;
+    assert_eq!(code, 0);
+    // The time of the notice has passed: nothing can be stopped in it, and nothing is lost.
+    let path = device(&dir, &format!("HIBERNATE {}\n", now_secs() - 5));
+    let (code, line) = celaut(
+        &dir,
+        &["notice", "--shutdown", "--device", path.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(code, 0, "{line}");
+    assert_eq!(line["timed_out"], true);
+    assert_eq!(line["stopped"], 0);
+    assert_eq!(line["leaked"], 1);
+    let (_, list) = celaut(&dir, &["list"]).await;
+    assert_eq!(
+        list["instances"].as_array().unwrap().len(),
+        1,
+        "a later shutdown can try again"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_with_no_device_says_what_the_service_has_to_declare() {
+    let (_, dir) = node().await;
+    let (code, error) = celaut(&dir, &["notice", "--device", "/nonexistent/hvc0"]).await;
+    assert_eq!(code, 1);
+    assert_eq!(error["kind"], "notice");
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("notice_declaration"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_shutdown_with_an_empty_pool_needs_no_gateway() {
+    // No node and no configuration: the service has no dependencies, so there is nothing to ask.
+    let dir = std::env::temp_dir().join(format!("celaut-cli-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = device(&dir, &format!("STOP {}\n", now_secs() + 30));
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_celaut"))
+        .arg("--config")
+        .arg(dir.join("no-such-config"))
+        .arg("--state")
+        .arg(dir.join("pool.json"))
+        .args(["notice", "--shutdown", "--device"])
+        .arg(&path)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(line["stopped"], 0);
+    assert_eq!(line["leaked"], 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}

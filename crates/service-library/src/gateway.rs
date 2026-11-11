@@ -64,6 +64,12 @@ pub trait Node: Send + Sync + 'static {
     ) -> impl Future<Output = Result<ServiceInstance, Error>> + Send;
 
     /// Stop the instance with `token`. It gives back the MU that the instance did not use.
+    ///
+    /// Not always at the answer: if the service of the instance declared a notice, the node
+    /// writes it, marks the instance to stop at the end of the notice (15 seconds by default)
+    /// and answers at once with **0**. The MU that it did not use come back to you when the
+    /// stop ends, and the signed ledger has them then. So 0 is not proof that nothing came
+    /// back. A service with no notice is stopped at once, and the answer has the refund.
     fn stop(&self, token: &str) -> impl Future<Output = Result<u128, Error>> + Send;
 }
 

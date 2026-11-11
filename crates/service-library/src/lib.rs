@@ -18,6 +18,7 @@ pub mod gateway;
 pub mod instance;
 pub mod manager;
 pub mod network;
+pub mod notice;
 pub mod observe;
 pub mod package;
 pub mod packer;

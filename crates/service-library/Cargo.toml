@@ -19,7 +19,7 @@ blake2 = "0.11"
 ring = "0.17"
 hex = "0.4"
 tokio-stream = { version = "0.1", default-features = false }
-tokio = { version = "1.53", features = ["rt", "time", "sync", "macros", "net", "io-util", "fs"] }
+tokio = { version = "1.54", features = ["rt", "time", "sync", "macros", "net", "io-util", "fs"] }
 tonic = { version = "0.14", default-features = false, features = ["transport"] }
 tonic-prost = { version = "0.14", default-features = false }
 
@@ -29,5 +29,6 @@ tonic-prost = { version = "0.14", default-features = false }
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
 
 [dev-dependencies]
+libc = "0.2"
 tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
-tokio = { version = "1.53", features = ["rt", "time", "sync", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }
+tokio = { version = "1.54", features = ["rt", "time", "sync", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }

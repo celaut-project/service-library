@@ -57,8 +57,12 @@ that fails is in the report as a leak, not as success.
 without it the node funds the instance for some hours of the resources that it asks for.
 Read the balance of an instance with `Gateway::metrics`, and move balance with
 `Gateway::modify_deposit` (positive to the instance, negative back to you). `StopService`
-gives the unused balance back to you. A stop that fails on every attempt is an error that
-says the instance may still run: treat it as a leak, not as success.
+gives the unused balance back to you. **Not always in the answer**: if the service of the
+instance declared a notice (below), the node writes it, marks the instance to stop at the end of
+the notice (15 seconds by default) and answers at once with a refund of **0**. The balance comes
+back to you when the stop ends, and the signed ledger has it then. A refund of 0 is not proof
+that nothing came back. A stop that fails on every attempt is an error that says the instance
+may still run: treat it as a leak, not as success.
 
 **Telling "refused" from "unreachable".** `Error::is_unreachable` is true when the gateway did
 not answer. Do not count it as a fault of the node when you keep a reputation or accuse
@@ -124,6 +128,41 @@ slot with its `internal_port`, its `transport` and its `protocol_stack` as the m
 them (`network::slots`). Pick the slot by protocol, never by port number: nobody agrees on
 ports. A port that the member does not declare has no protocol, and it is not guessed. A
 refusal is exit code 1, a node that does not answer is 3.
+
+**The notice before a stop.** A service packed with nodo's packer declares a notice by
+default (`notice_declaration` in `service.json`; `false` turns it off). Before the node stops or
+hibernates the instance, for its father (`StopService`, `nodo kill`, a hibernation) or at the
+close of the activity window, it writes `STOP <t>` or `HIBERNATE <t>` to `/dev/hvc0`, where `<t>`
+is a unix time in seconds, and stops or hibernates it at `<t>` (15 seconds from the line by
+default), or when the VM ends if that is earlier. **A service that does not read the device
+makes the node wait all of the time at each stop.** So read it, or turn the notice off. A burn
+of the node (`nodo burnall`), a lost VM and an instance that is out of balance get no notice:
+they are stopped at once.
+
+With the library: `notice::watch_device(notice::DEVICE)` opens the device **once** and gives
+`Notice { verb, deadline }` (`Verb::Stop` or `Verb::Hibernate`; `remaining()` is the time left).
+A verb that it does not know is skipped. `notice::shutdown_on_notice` (and
+`spawn_shutdown_on_notice`) waits for the first notice and stops the idle instances of the pool
+within its time. Both verbs stop the dependencies: a hibernation ends the VM too, the memory
+with your tokens is lost, and at the wake the entrypoint runs again on the same disk with an
+empty pool, while the instances that you did not stop go on billing. **An instance that a lease
+holds is not stopped there**: give it back, or call `Lease::stop`. Flush your state and exit:
+PID 1 that exits ends the wait at once. Do not read the device with an open for each line
+(`head -n1`, `read x < /dev/hvc0`, `cat` in a pipe): a line can be lost, and a script that reaches
+its end makes PID 1 exit. Only one reader should have the device: each line is read once.
+
+With the command, a service in any language:
+
+```sh
+./my-service & APP=$!
+( celaut notice --shutdown > /tmp/notice.json && kill -TERM "$APP" ) &   # the first notice stops the pool
+wait "$APP"                                  # the service flushes and exits; PID 1 ends; the node stops waiting
+```
+
+`celaut notice` prints one JSON for each notice (`{"verb":"stop","deadline":...,"remaining_secs":...}`);
+`--once` ends after the first, and `--shutdown` also stops every instance of the pool within the
+time of the notice (`stopped`, `leaked`, and `timed_out` if the time ran out: what was not
+stopped stays in the pool file for a later `shutdown`). `--device PATH` reads another device.
 
 **Not your concern.** Choosing between nodes, and balancing the load, belong to the node of the
 service and to clients. A service talks to one gateway.

@@ -636,6 +636,49 @@ async fn a_refund_that_the_node_claimed_and_the_ledger_does_not_show_is_reported
 }
 
 #[tokio::test]
+async fn a_stop_that_waits_for_the_notice_is_answered_with_0_and_its_refund_comes_later() {
+    // nodo#645: the node writes the notice to the service, marks the instance and answers
+    // StopService at once with a refund of 0. The tick ends the stop later, and the ledger gets
+    // the refund and the `stop` then. Neither is a fault.
+    let fake = Fake::new();
+    fake.set("token:root", vec![credit(1_000)]);
+    let v = verifier(&fake, 1_000_000).await;
+    let answered = Expectation {
+        stopped_by_us: true,
+        refund_claimed_mu: Some(0),
+        stopped_secs_ago: 3,
+    };
+
+    // During the notice: the account is alive. It is not "not stopped" yet.
+    assert!(v.check("root", answered).await.all_findings().is_empty());
+
+    // The stop ends: the refund goes to the father, the reason is the one of the request.
+    fake.push(
+        "token:root",
+        vec![refund(800, r#"{"to":"father"}"#), stop("manual_kill", 0)],
+    );
+    let ended = Expectation {
+        stopped_secs_ago: 16,
+        ..answered
+    };
+    let report = v.check("root", ended).await;
+
+    assert!(
+        report.all_findings().is_empty(),
+        "{:?}",
+        report.all_findings()
+    );
+    assert!(matches!(report.state, AccountState::Stopped { .. }));
+}
+
+#[test]
+fn the_time_to_wait_for_a_stop_is_above_the_default_grace_of_a_node() {
+    // The grace of a node is 15 seconds by default. The verifier must wait longer than that
+    // and the tick that ends it, or it reports a stop that is in progress.
+    const { assert!(service_library::verifier::STOP_GRACE_SECONDS > 15 + 30) };
+}
+
+#[tokio::test]
 async fn another_stop_reason_than_the_one_the_service_asked_for_is_reported() {
     let fake = Fake::new();
     fake.set(

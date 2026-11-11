@@ -18,6 +18,7 @@ use service_library::config::{grpc_uri, NodeConfig, DEFAULT_CONFIG_PATH};
 use service_library::gateway::{amount, Gateway, Node};
 use service_library::manager::tcp_is_alive;
 use service_library::network;
+use service_library::notice;
 use service_library::observe::ObserveOptions;
 use service_library::package::{self, PackageInfo};
 use service_library::packer::Packer;
@@ -67,6 +68,13 @@ Commands:
   tunnel    <lease> --slot N   send stdin to a port of the instance; the answer to stdout
   observe   <lease> [--packets] [--receipts]
                                the events of the instance, one JSON per line
+  notice    [--device PATH (/dev/hvc0)] [--once] [--shutdown]
+                               the notices that the node writes to THIS service before it stops
+                               or hibernates it, one JSON per line: {verb, deadline,
+                               remaining_secs}. The service has to declare notice_declaration.
+                               --once ends after the first. --shutdown also stops every
+                               instance of the pool within the time of the notice (it ends
+                               after the first): {..., stopped, leaked}
   resize    --mem BYTES        ask the node for a memory limit for this service
   resolve   --tag T... [--formal K=V]... [--protocol P]... [--prose TEXT]
                                the members of a network: {tags, peers}. The node also
@@ -101,6 +109,8 @@ const SWITCHES: &[&str] = &[
     "no-verify",
     "packets",
     "receipts",
+    "once",
+    "shutdown",
     "no-inherit",
     "require-receipt",
     "no-receipt-check",
@@ -455,22 +465,55 @@ impl Context {
     /// Stop the instances `taken` out of the pool. The ones that do not stop go back to it,
     /// so that a later `shutdown` tries them again.
     async fn stop_all(&self, gateway: &Gateway, taken: Vec<Instance>) -> Res<Value> {
+        self.stop_all_within(gateway, taken, None).await
+    }
+
+    /// Stop the instances, and give the time that `within` says at most (`None`: no limit).
+    /// What is not stopped when the time ends stays in the pool as a leak, so a later
+    /// `shutdown` can try again: its token is not lost. `timed_out` says it ended that way.
+    async fn stop_all_within(
+        &self,
+        gateway: &Gateway,
+        taken: Vec<Instance>,
+        within: Option<Duration>,
+    ) -> Res<Value> {
+        let end = within.map(|d| tokio::time::Instant::now() + d);
         let mut stopped = 0;
         let mut leaked = Vec::new();
-        for instance in taken {
-            match gateway.stop_with_retries(&instance.token).await {
-                Ok(_) => stopped += 1,
-                Err(_) => leaked.push(Instance {
+        let mut timed_out = false;
+        let mut rest = taken.into_iter();
+        while let Some(instance) = rest.next() {
+            let attempt = gateway.stop_with_retries(&instance.token);
+            let result = match end {
+                Some(end) => tokio::time::timeout_at(end, attempt).await.ok(),
+                None => Some(attempt.await),
+            };
+            match result {
+                Some(Ok(_)) => stopped += 1,
+                Some(Err(_)) => leaked.push(Instance {
                     leased: false,
                     ..instance
                 }),
+                None => {
+                    timed_out = true;
+                    leaked.push(Instance {
+                        leased: false,
+                        ..instance
+                    });
+                    leaked.extend(rest.map(|i| Instance { leased: false, ..i }));
+                    break;
+                }
             }
         }
         let leaked_count = leaked.len();
         if !leaked.is_empty() {
             self.pool(|p| p.instances.extend(leaked))?;
         }
-        Ok(json!({ "stopped": stopped, "leaked": leaked_count }))
+        let mut report = json!({ "stopped": stopped, "leaked": leaked_count });
+        if timed_out {
+            report["timed_out"] = json!(true);
+        }
+        Ok(report)
     }
 }
 
@@ -918,6 +961,42 @@ async fn run(args: Args) -> Res<Value> {
             }
             Ok(Value::Null)
         }
+        "notice" => {
+            let device = args.value("device").unwrap_or(notice::DEVICE);
+            let shutdown = args.has("shutdown");
+            let once = args.has("once") || shutdown;
+            let mut notices = notice::watch_device(device).await?;
+            let mut out = tokio::io::stdout();
+            while let Some(received) = notices.next().await {
+                let remaining = received.remaining();
+                let mut line = json!({
+                    "verb": received.verb,
+                    "deadline": received.deadline,
+                    "remaining_secs": remaining.as_secs(),
+                });
+                if shutdown {
+                    // Both verbs: a hibernation ends the VM too, and the pool file of this
+                    // service is on the disk that is kept, but the instances go on billing.
+                    let all = ctx.pool(|p| std::mem::take(&mut p.instances))?;
+                    // A service with no dependencies needs no gateway to say so.
+                    let report = if all.is_empty() {
+                        json!({ "stopped": 0, "leaked": 0 })
+                    } else {
+                        let gateway = ctx.gateway()?;
+                        ctx.stop_all_within(&gateway, all, Some(remaining)).await?
+                    };
+                    if let (Some(line), Some(report)) = (line.as_object_mut(), report.as_object()) {
+                        line.extend(report.clone());
+                    }
+                }
+                out.write_all(format!("{line}\n").as_bytes()).await?;
+                out.flush().await?;
+                if once {
+                    break;
+                }
+            }
+            Ok(Value::Null)
+        }
         "resize" => {
             let mem = args
                 .number::<u64>("mem")?
@@ -1007,6 +1086,7 @@ fn report(fail: Fail) -> ExitCode {
                 Error::Receipt(_) => "receipt",
                 Error::Resources(_) => "resources",
                 Error::Protocol(_) => "protocol",
+                Error::Notice(_) => "notice",
                 Error::Packer { .. } => "packer",
                 Error::Registry { .. } => "registry",
             };

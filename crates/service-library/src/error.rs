@@ -53,6 +53,9 @@ pub enum Error {
         /// What the explorer said, or what went wrong.
         message: String,
     },
+    /// The device of the notice cannot be read (see [`crate::notice`]).
+    #[error("the notice device cannot be read: {0}")]
+    Notice(String),
     /// The gateway answered something that is not usable.
     #[error("unexpected answer: {0}")]
     Protocol(String),
