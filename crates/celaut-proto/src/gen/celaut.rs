@@ -205,11 +205,16 @@ pub struct Service {
     /// The domains where the instances of the service find their peers.
     #[prost(message, repeated, tag = "4")]
     pub network: ::prost::alloc::vec::Vec<service::Network>,
-    /// The scenarios of instances that the service can start while it runs.
+    /// The load that the service can ask for later, while it runs. Each clause must fit
+    /// on the node or on a peer that it knows. If not, the node can refuse to start the
+    /// service. It is in the admission only. It has no cost.
     #[prost(message, repeated, tag = "5")]
-    pub possible_environment_workload: ::prost::alloc::vec::Vec<
-        service::PossibleEnvironmentWorkload,
-    >,
+    pub possible_environment_workload: ::prost::alloc::vec::Vec<service::Clause>,
+    /// The load that the service needs to start. It is in the admission, as
+    /// possible_environment_workload, and in the cost: EstimatedCost.cost includes the
+    /// builds of these children. Each child gets its balance in its own start.
+    #[prost(message, repeated, tag = "6")]
+    pub initial_environment_workload: ::prost::alloc::vec::Vec<service::Clause>,
 }
 /// Nested message and enum types in `Service`.
 pub mod service {
@@ -261,58 +266,55 @@ pub mod service {
             pub mu_per_call: ::prost::alloc::vec::Vec<super::super::AmountKeyValue>,
         }
     }
-    /// One scenario of instances that the service can start at the same time. Scenarios
-    /// are independent: they do not add up, and they have no sequence. Each workload of a
-    /// scenario must be able to run on the node or on a peer that it knows. If not, the
-    /// node can refuse to start the service. The node checks one instance of each workload. It does not
-    /// keep resources for the instances.
+    /// One group of identical instances that run at the same time.
     #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct PossibleEnvironmentWorkload {
-        /// The groups of the scenario.
-        #[prost(message, repeated, tag = "1")]
-        pub workloads: ::prost::alloc::vec::Vec<possible_environment_workload::Workload>,
+    pub struct Workload {
+        /// The number of instances that run at the same time.
+        #[prost(uint32, tag = "1")]
+        pub count: u32,
+        /// The service of the instances: a hash, a service, or both. A workload with no
+        /// resources in its service is always satisfiable.
+        #[prost(message, optional, tag = "2")]
+        pub dependency: ::core::option::Option<workload::Dependency>,
     }
-    /// Nested message and enum types in `PossibleEnvironmentWorkload`.
-    pub mod possible_environment_workload {
-        /// One group of identical instances that run at the same time.
+    /// Nested message and enum types in `Workload`.
+    pub mod workload {
+        /// The service of the workload.
         #[derive(Clone, PartialEq, ::prost::Message)]
-        pub struct Workload {
-            /// The number of instances that run at the same time.
-            #[prost(uint32, tag = "1")]
-            pub count: u32,
-            /// The most resources that each of these instances can use. Its benchmark
-            /// gives the minimum score for each core.
+        pub struct Dependency {
+            /// Known content hashes of the service.
+            #[prost(message, repeated, tag = "1")]
+            pub hash: ::prost::alloc::vec::Vec<super::super::metadata::hash_tag::Hash>,
+            /// The full or a partial specification of the service. The resources of the
+            /// workload are in service.container.resources: at_init for the start, and
+            /// at_most for the limit. A partial service can have only the resources and
+            /// the architecture.
             #[prost(message, optional, tag = "2")]
-            pub resources: ::core::option::Option<super::super::Sysresources>,
-            /// The service of the instances, if the workload is for one service. If the
-            /// field is absent, the workload gives only resources.
-            #[prost(message, optional, tag = "3")]
-            pub dependency: ::core::option::Option<workload::Dependency>,
+            pub service: ::core::option::Option<super::super::Service>,
+            /// True if the service field is complete, so a reader can calculate its
+            /// hashes and compare them with the hash field.
+            #[prost(bool, tag = "3")]
+            pub is_completed: bool,
+            /// True if the full service is in the filesystem of this service, for
+            /// example as a file that it sends later to StartService.
+            #[prost(bool, tag = "4")]
+            pub on_filesystem: bool,
         }
-        /// Nested message and enum types in `Workload`.
-        pub mod workload {
-            /// The service of the workload. A workload that gives only resources has no
-            /// Dependency.
-            #[derive(Clone, PartialEq, ::prost::Message)]
-            pub struct Dependency {
-                /// Known content hashes of the service.
-                #[prost(message, repeated, tag = "1")]
-                pub hash: ::prost::alloc::vec::Vec<
-                    super::super::super::metadata::hash_tag::Hash,
-                >,
-                /// The full or a partial specification of the service.
-                #[prost(message, optional, tag = "2")]
-                pub service: ::core::option::Option<super::super::super::Service>,
-                /// True if the service field is complete, so a reader can calculate its
-                /// hashes and compare them with the hash field.
-                #[prost(bool, tag = "3")]
-                pub is_completed: bool,
-                /// True if the full service is in the filesystem of this service, for
-                /// example as a file that it sends later to StartService.
-                #[prost(bool, tag = "4")]
-                pub on_filesystem: bool,
-            }
-        }
+    }
+    /// AND: all the workloads of the group run at the same time.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Group {
+        /// The workloads of the group.
+        #[prost(message, repeated, tag = "1")]
+        pub workloads: ::prost::alloc::vec::Vec<Workload>,
+    }
+    /// OR: one group of the clause is sufficient. The service chooses the group at run
+    /// time.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Clause {
+        /// The groups of the clause.
+        #[prost(message, repeated, tag = "1")]
+        pub any_of: ::prost::alloc::vec::Vec<Group>,
     }
     /// What the node runs: the architecture, the filesystem, the entry point and the
     /// resources.
@@ -343,6 +345,10 @@ pub mod service {
         /// Configuration.environment_variables.
         #[prost(message, repeated, tag = "7")]
         pub environment_variables: ::prost::alloc::vec::Vec<super::DataFormatKeyValue>,
+        /// Where the service reads the notices of the node. Optional. With no value, the
+        /// node stops the service at once, with no notice.
+        #[prost(message, optional, tag = "8")]
+        pub notice_declaration: ::core::option::Option<container::NoticeDeclaration>,
     }
     /// Nested message and enum types in `Container`.
     pub mod container {
@@ -454,6 +460,26 @@ pub mod service {
             #[prost(message, optional, tag = "2")]
             pub format: ::core::option::Option<super::super::DataFormat>,
         }
+        /// Where the service reads the notices of the node, and what carries them. A
+        /// notice tells the service that the node will stop it, or hibernate it, after a
+        /// time that the notice gives. A service with no declaration gets no notice. A
+        /// node that does not know the system, the format or the path refuses to run the
+        /// service.
+        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        pub struct NoticeDeclaration {
+            /// The path of the device in the container, as path segments. For example
+            /// "dev", "hvc0".
+            #[prost(string, repeated, tag = "1")]
+            pub path: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+            /// The system that carries the notices. The tags name it, for example
+            /// "virtio-console".
+            #[prost(message, optional, tag = "2")]
+            pub system: ::core::option::Option<super::api::Protocol>,
+            /// The format of what the node writes. The tags name it, for example
+            /// "nodo-notice".
+            #[prost(message, optional, tag = "3")]
+            pub format: ::core::option::Option<super::super::DataFormat>,
+        }
         /// The resources of one instance of the service.
         #[derive(Clone, PartialEq, ::prost::Message)]
         pub struct Resources {
@@ -551,8 +577,9 @@ pub struct Configuration {
     /// does not spend. If the build does not fit in the amount, or if the balance that
     /// is left is less than one maintenance period with the resources at the start, the
     /// node rejects the start and charges nothing. If it is absent or zero, the node uses
-    /// the cost of the build plus a default balance that it calculates from the resources
-    /// at the start.
+    /// EstimatedCost.cost plus a default balance. The node calculates the default balance
+    /// from the resources at the start, for its own default number of maintenance
+    /// periods.
     #[prost(message, optional, tag = "3")]
     pub initial_mu: ::core::option::Option<Amount>,
 }
@@ -622,8 +649,8 @@ pub struct Sysresources {
     /// second, over a working set of that size). Compare a bandwidth only with a
     /// bandwidth over the same size. If the node has no score for that size, it uses the
     /// score of the smallest larger size that it measured. If it has no such score, it
-    /// does not apply that minimum. In Service.Container.Resources.at_init, in
-    /// PossibleEnvironmentWorkload.Workload.resources and in a GetResourceAvailability
+    /// does not apply that minimum. In Service.Container.Resources.at_init (also in the
+    /// service of a Service.Workload) and in a GetResourceAvailability
     /// request, the values are the minimum. In Peer.resources, they are the scores that the node
     /// measured. In Service.Container.Resources.at_most, they have no meaning.
     #[prost(message, repeated, tag = "99")]
@@ -684,37 +711,107 @@ pub struct DescendantTunnel {
 /// The cost to run a service on the node. The node that answers sets it.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EstimatedCost {
-    /// The least Configuration.initial_mu with which the node starts the service, in MU.
-    /// It is the cost to build the service, plus the balance that the instance has after
-    /// the build. This balance is the initial_mu of the request. If the request has no
-    /// initial_mu, the node uses its own default balance for the resources at the start.
-    /// A caller that sets initial_mu to this value pays no more than this value for the
-    /// start, because the node takes the cost of the build from initial_mu.
+    /// The cost that the start spends, in MU. It is the cost to build the service, plus
+    /// the cost to build its initial children. It does not include a balance, for the
+    /// service or for its children. If the service is already built, its build cost is
+    /// 0. The node takes the cost of the builds from Configuration.initial_mu, and the
+    /// remainder is the balance of the instance.
+    ///
+    /// The initial children are the children of Service.initial_environment_workload.
+    /// For each workload: count times the cost to build the child. The cost of a group is
+    /// the sum of its workloads, the cost of a clause is the highest cost of its groups,
+    /// and the total is the sum of the clauses. Each child gets its balance in its own
+    /// StartService. The parent pays that start from its own balance.
+    ///
+    /// To fund the instance for N maintenance periods, a client sends an initial_mu that
+    /// is this cost plus a sum. The client chooses N. The sum is: for each maintenance
+    /// period i, from 1 to N, the init_maintenance_cost times (1 + price_volatility) to
+    /// the power k(i). The value k(i) is
+    /// floor(i * maintenance_seconds_loop / volatility_period_seconds) + 1. If
+    /// volatility_period_seconds is 0, k(i) is 1. The node uses the same k(i) for the
+    /// charge of the period i. The balance must pay at least one period (N = 1), or the
+    /// node does not start the service. This sum applies only when price_bounded is
+    /// true. If price_bounded is false, the node makes no promise, and the client chooses
+    /// the amount itself. If the request has no initial_mu, the node uses this cost plus
+    /// the sum for its own default number of periods.
     #[prost(message, optional, tag = "1")]
     pub cost: ::core::option::Option<Amount>,
-    /// The cost of one maintenance period with the resources at the start, in MU.
+    /// The cost of one maintenance period with the resources at_init, in MU. The resources
+    /// at_init are the resources that the instance has when it starts. The figure is the
+    /// price at the time of the estimate. The price of a later period can be higher. See
+    /// price_volatility.
     #[prost(message, optional, tag = "2")]
     pub init_maintenance_cost: ::core::option::Option<Amount>,
-    /// The cost of one maintenance period with the maximum resources, in MU. This is the
-    /// statement that the node signs about the price. If the node sets
-    /// `pricing.MAX_PRICE_VOLATILITY`, the figure is a hard ceiling: it is priced at the
-    /// worst-case price multiplier that the bound allows, and no maintenance period of the
-    /// instance charges more. A client that sees a charge above this figure has proof
-    /// that the node broke its quote. If the node does not set the bound, the figure is
-    /// only the charge at the current load of the node, and a later period can charge
-    /// more. In that case the figure is not a ceiling.
+    /// The cost of one maintenance period with the resources at_most, in MU. The resources
+    /// at_most are the most that the instance declares that it can ask for. The figure is
+    /// the price at the time of the estimate. It is not a limit on the charge of a
+    /// period. The price of a running instance can rise above it. The limit of the price
+    /// is set by price_volatility and volatility_period_seconds, and only if price_bounded
+    /// is true.
     #[prost(message, optional, tag = "3")]
     pub max_maintenance_cost: ::core::option::Option<Amount>,
     /// The length of one maintenance period, in seconds.
     #[prost(int32, tag = "4")]
     pub maintenance_seconds_loop: i32,
-    /// How much the real costs can be different from the estimate, with no unit. A
-    /// reader multiplies each cost by (1 + variance * k). The reader selects the factor
-    /// k. A node that cannot estimate the difference sends 0. The variance does not
-    /// limit the price of a running instance. The ceiling of the price is in
-    /// max_maintenance_cost, and only when the node sets the bound.
-    #[prost(float, tag = "5")]
-    pub variance: f32,
+    /// True if the node promises a limit on the price. The limit is set by
+    /// price_volatility and volatility_period_seconds. A maintenance period of the
+    /// instance must not charge more than that limit. A client that sees a larger charge
+    /// can report the node. False means that the node makes no promise. The other two
+    /// fields have no meaning then. False is the default value of this field.
+    #[prost(bool, tag = "5")]
+    pub price_bounded: bool,
+    /// The highest relative rise of the price in one volatility period. For example, 0.10
+    /// means that the price can rise by 10 percent in each period. The price at the time
+    /// t is at most the launch price times (1 + price_volatility) to the power k, where k
+    /// is the number of the period of t, counted from the launch of the instance. The
+    /// price can fall without limit. A reader that gets a value that is not a finite
+    /// number, or a value below 0, reads it as 0.
+    #[prost(float, tag = "6")]
+    pub price_volatility: f32,
+    /// The length of one volatility period, in seconds. The first period starts at the
+    /// launch of the instance. If the value is 0, the whole life of the instance is one
+    /// period. A reader that gets a value below 0 reads it as 0.
+    #[prost(int32, tag = "7")]
+    pub volatility_period_seconds: i32,
+    /// The unix time of the next scheduled close of the activity window of the node, in
+    /// seconds. 0 means that no close is scheduled. It is an absolute time, so it does
+    /// not change while the answer travels. It is not a promise that the instance lives
+    /// until this time: the node can stop for a cause that is not in its schedule. It is
+    /// also not a promise of a long life when it is 0.
+    #[prost(int64, tag = "8")]
+    pub closes_at: i64,
+    /// What the node does with a running instance when the window closes. A node that
+    /// does not set this field reads as ON_CLOSE_REFUSE.
+    #[prost(enumeration = "OnClose", tag = "9")]
+    pub on_close: i32,
+}
+/// The hours in which a node takes new work, and what it does with a running instance
+/// when it closes. It describes one repeating day: the same spans every day.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityWindow {
+    /// The node is open when the time is in any span.
+    #[prost(message, repeated, tag = "1")]
+    pub spans: ::prost::alloc::vec::Vec<activity_window::Span>,
+    /// What the node does with a running instance when it closes.
+    #[prost(enumeration = "OnClose", tag = "2")]
+    pub on_close: i32,
+}
+/// Nested message and enum types in `ActivityWindow`.
+pub mod activity_window {
+    /// One open span, in minutes from 00:00 UTC, from 0 to 1439. The span starts at
+    /// start_minute (included) and ends at end_minute (not included). If end_minute is
+    /// less than start_minute, the span passes midnight UTC.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct Span {
+        /// The first minute of the span, from 0 to 1439, in minutes from 00:00 UTC. It is
+        /// in the span.
+        #[prost(int32, tag = "1")]
+        pub start_minute: i32,
+        /// The end of the span, from 0 to 1439, in minutes from 00:00 UTC. It is not in
+        /// the span. If it is less than start_minute, the span passes midnight UTC.
+        #[prost(int32, tag = "2")]
+        pub end_minute: i32,
+    }
 }
 /// The resources for one architecture. In Peer.resources: the most that the node
 /// supports for that architecture, with its measured benchmark scores. In a
@@ -740,6 +837,11 @@ pub struct ResourceAvailability {
     /// Why the node cannot. Empty if can_execute is true. For a person: do not parse it.
     #[prost(string, tag = "2")]
     pub reason: ::prost::alloc::string::String,
+    /// The unix time of the next opening of the activity window, in seconds. The node sets
+    /// it when it answers can_execute = false because it is closed. It is 0 if there is
+    /// no opening to give, or if the cause is not the window.
+    #[prost(int64, tag = "3")]
+    pub opens_at: i64,
 }
 /// The request of LocateShare.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1144,6 +1246,14 @@ pub struct Peer {
     /// not fit the request.
     #[prost(message, repeated, tag = "8")]
     pub resources: ::prost::alloc::vec::Vec<ArchitectureResources>,
+    /// The hours in which the node takes new work. If the message is absent, the node
+    /// gives no schedule: a reader does not assume that the node is open or closed. An
+    /// empty list of spans means that the node is always open. It is the schedule that
+    /// the node has now: it can change, and the node then announces a new Peer with a
+    /// higher ts. It is not a promise. The quote (EstimatedCost.closes_at and on_close)
+    /// is the authority for one instance.
+    #[prost(message, optional, tag = "9")]
+    pub activity_window: ::core::option::Option<ActivityWindow>,
     /// The unix time of the announcement, in seconds. A reader accepts a Peer only if its
     /// ts is more than the ts of the last Peer that it accepted for the same public_key.
     #[prost(int64, tag = "99")]
@@ -1636,5 +1746,40 @@ pub mod observe_event {
         /// if the request has include_receipts.
         #[prost(message, tag = "14")]
         Receipt(super::ExecutionReceipt),
+    }
+}
+/// What a node does with a running instance when its activity window closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OnClose {
+    /// The node does not touch the instance. It refuses a new child and a resource
+    /// increase until the window opens. This is the default value, so an older node reads
+    /// as ON_CLOSE_REFUSE.
+    Refuse = 0,
+    /// The node stops the instance and refunds the balance.
+    Stop = 1,
+    /// The node hibernates the instance, and wakes it when the window opens.
+    Hibernate = 2,
+}
+impl OnClose {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Refuse => "ON_CLOSE_REFUSE",
+            Self::Stop => "ON_CLOSE_STOP",
+            Self::Hibernate => "ON_CLOSE_HIBERNATE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ON_CLOSE_REFUSE" => Some(Self::Refuse),
+            "ON_CLOSE_STOP" => Some(Self::Stop),
+            "ON_CLOSE_HIBERNATE" => Some(Self::Hibernate),
+            _ => None,
+        }
     }
 }
