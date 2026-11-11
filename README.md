@@ -14,6 +14,7 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::gateway` | The calls of a service: `StartService` (by hash), `StopService` (with retries), `ModifyDeposit`, `GetMetrics`, `GetServiceEstimatedCost`. A service sends no `Client`. |
 | `service-library::gateway` (more) | `ModifyServiceSystemResources` (`modify_resources`) and `ServiceTunnel` (`tunnel`: one request and one answer). |
 | `service-library::network`, `Gateway::resolve_network` | `ResolveNetwork`: the members of a `Service.Network`, with every port and the protocols it declares for each. The call is a grant: the node opens the returned addresses in the firewall of the service. Tested against an in-process node. |
+| `service-library::notice` | The notice that the node writes to the service before it stops or hibernates it (nodo#645): `watch_device` reads `/dev/hvc0` once and gives `Notice { verb, deadline }`, `shutdown_on_notice` stops the idle instances of the pool within the time of the notice. A service that does not read the device makes the node wait all its time at each stop. `celaut notice` is the command. Tested on a real pty. |
 | `service-library::observe`, `Gateway::chat` | `Observe` as a stream of events, and `Chat` to the operator of a node. Tested against an in-process node. |
 | `service-library::tunnel` | A streaming `ServiceTunnel` with the check of the signed checkpoints of the node, ported from chatui and tested against an in-process node that lies. |
 | `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`; `add_service` by hash and `add_package` from a `.bee` file (checked block by block); `add_directory_package` from `__services__/<hash>` and `__metadata__/<hash>` directories (read with `bee_rpc::store`); per-dependency options; start retries; `Lease::call` records how a call went; LIFO reuse; `tcp_is_alive`; optional check of the start receipt. |
@@ -54,7 +55,7 @@ celaut shutdown                      # stop every instance, when the service end
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
-`metrics`, `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
+`metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines; `data` holds the fields of the event: the session, the packets with their peer, the notices), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.

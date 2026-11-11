@@ -9,6 +9,8 @@
 //! - Did the instance die with MU that nobody got? ([`Finding::StoppedWithMu`], the fault
 //!   that nodo scores as `killed_with_mu`.)
 //! - Is the refund that `StopService` gave back in the signed ledger? ([`Finding::RefundMismatch`].)
+//!   A stop that the node delays for the notice of the service is answered with 0 and ends
+//!   later; the ledger gives its refund then, and that is not a mismatch.
 //! - Are the children and grandchildren that the instance started alive, and did the node
 //!   keep to the rules with them? The children are the `child_bound` movements of the
 //!   account of the instance, and the grandchildren those of each child.
@@ -54,6 +56,11 @@ const MAX_TICK_FACTOR: u128 = 10;
 
 /// How long after a stop that the service asked for the ledger must show it before the
 /// verifier says that the account is not stopped ([`Finding::NotStopped`]), in seconds.
+///
+/// A node that gives a notice to the service of the instance (nodo#645) ends the stop up to
+/// its own `instances.STOP_GRACE_SECONDS` after the call (15 by default, and the operator can
+/// change it), and the ledger shows the `stop` then. This must stay above that time: with a
+/// node whose grace is 120 or more, a stop that is in progress would be reported.
 pub const STOP_GRACE_SECONDS: u64 = 120;
 
 /// What the verifier may do. It starts from [`VerifierConfig::with_budget`].
@@ -94,7 +101,10 @@ impl VerifierConfig {
 pub struct Expectation {
     /// The service stopped the instance (a stop that the node answered).
     pub stopped_by_us: bool,
-    /// The MU that the node said it gave back at that stop.
+    /// The MU that the node said it gave back at that stop. A stop that waits for the notice
+    /// of the service (nodo#645) is answered with 0, and the real refund comes later, in the
+    /// ledger: it is only a mismatch if the ledger gives back *less* than what was claimed, so
+    /// a claim of 0 never is one.
     pub refund_claimed_mu: Option<u128>,
     /// The seconds since the service stopped it.
     pub stopped_secs_ago: u64,
