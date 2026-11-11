@@ -48,7 +48,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::gateway::Gateway;
 use crate::instance::token_tag;
-use crate::statement::{self, KeptHead, Kind, Rates, StatementError, StatementRequest, Stop};
+use crate::statement::{
+    self, KeptHead, Kind, Rates, StatementError, StatementRequest, Stop, VerifiedStatement,
+};
 use crate::Error;
 
 /// The factor that bounds the `tick` of a `stop`, as nodo does (`_MAX_TICK_FACTOR`).
@@ -382,6 +384,55 @@ impl Verifier {
     pub fn budget(&self) -> (u128, u128) {
         let spent = self.state.lock().unwrap().spent;
         (spent, self.config.budget_mu.saturating_sub(spent))
+    }
+
+    /// Read one statement of the account of this service itself, within the budget of the
+    /// verifier. The node knows the caller by its address, so no token is given; the account
+    /// of the answer cannot be compared with one (see [`crate::statement::verify`]).
+    ///
+    /// `from_seq` and `to_seq` are the range, as in [`StatementRequest`]: 0 and 0 asks for no
+    /// movement, only the head and the balance, which is the cheapest read. `kept` is the head
+    /// of an earlier read of the same account, to tie this one to it. The read costs at most
+    /// [`StatementRequest::max_mu_needed`], and that is taken off the budget before the call;
+    /// a call that did not reach the node gives it back. If the budget is not enough, nothing
+    /// is sent and the error is [`StatementError::OverBudget`].
+    pub async fn read_own_account(
+        &self,
+        from_seq: u64,
+        to_seq: u64,
+        kept: Option<&KeptHead>,
+    ) -> Result<VerifiedStatement, StatementError> {
+        let request = StatementRequest {
+            token: String::new(),
+            instance_ref: String::new(),
+            from_seq,
+            to_seq,
+            // The account is the caller's own: the node asks no peer for it.
+            remaining_hops: 1,
+        };
+        request.check()?;
+        let needed = request.max_mu_needed(&self.rates);
+        {
+            let mut state = self.state.lock().unwrap();
+            let left = self.config.budget_mu.saturating_sub(state.spent);
+            if needed > left {
+                return Err(StatementError::OverBudget { needed, max: left });
+            }
+            state.spent += needed;
+        }
+        let answer = self
+            .gateway
+            .balance_statement(&request, &self.peer_id, &self.rates, needed, kept, now())
+            .await;
+        if let Err(StatementError::Wire(Error::Gateway {
+            unreachable: true, ..
+        })) = &answer
+        {
+            // A call that did not go out is not charged.
+            let mut state = self.state.lock().unwrap();
+            state.spent = state.spent.saturating_sub(needed);
+        }
+        answer
     }
 
     /// Read what the node signed about the instance with `token`, and about what is below

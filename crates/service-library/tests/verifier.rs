@@ -1182,3 +1182,54 @@ async fn the_budget_and_the_other_checks_still_apply_to_an_empty_token() {
         .unwrap_err();
     assert!(matches!(bad, StatementError::BadRequest(_)), "{bad:?}");
 }
+
+#[tokio::test]
+async fn the_verifier_reads_the_own_account_and_spends_from_its_budget() {
+    let fake = Fake::new();
+    fake.set("token:", vec![credit(1_000), credit(250)]);
+    let v = verifier(&fake, 1_000_000).await;
+
+    let head_only = v.read_own_account(0, 0, None).await.unwrap();
+    assert_eq!(head_only.balance, 1_250);
+    assert!(
+        head_only.movements.is_empty(),
+        "no range asks for the head only"
+    );
+    let (spent, left) = v.budget();
+    assert!(spent > 0, "a read costs MU");
+    assert_eq!(spent + left, 1_000_000);
+
+    let rows = v
+        .read_own_account(1, 2, Some(&head_only.head))
+        .await
+        .unwrap();
+    assert_eq!(rows.movements.len(), 2);
+    assert!(
+        v.budget().0 > spent,
+        "the second read is paid from the same budget"
+    );
+    let reads = fake.reads.lock().unwrap();
+    assert!(reads
+        .iter()
+        .all(|r| r.token.is_empty() && r.instance_ref.is_empty()));
+    assert!(
+        reads.iter().all(|r| r.hops == 1),
+        "the own account is not relayed"
+    );
+}
+
+#[tokio::test]
+async fn the_own_account_is_not_read_beyond_the_budget() {
+    let fake = Fake::new();
+    fake.set("token:", vec![credit(1_000)]);
+    let v = verifier(&fake, 0).await;
+
+    let error = v.read_own_account(0, 0, None).await.unwrap_err();
+
+    assert!(
+        matches!(error, StatementError::OverBudget { .. }),
+        "{error:?}"
+    );
+    assert!(fake.reads.lock().unwrap().is_empty(), "nothing was sent");
+    assert_eq!(v.budget(), (0, 0));
+}

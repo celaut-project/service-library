@@ -414,6 +414,31 @@ pub struct Movement {
     pub hash: String,
 }
 
+impl Kind {
+    /// The word that the node writes for this kind (`kind` of a movement). A kind that this
+    /// code does not know gives the word as the node wrote it.
+    pub fn name(&self) -> &str {
+        match self {
+            Kind::Deposit => "deposit",
+            Kind::Credit => "credit",
+            Kind::Debit => "debit",
+            Kind::Start => "start",
+            Kind::Build => "build",
+            Kind::Maintenance => "maintenance",
+            Kind::ChildStart => "child_start",
+            Kind::ChildBound(_) => KIND_CHILD_BOUND,
+            Kind::TopUp => "top_up",
+            Kind::Withdrawal => "withdrawal",
+            Kind::Refund => "refund",
+            Kind::Tunnel => "tunnel",
+            Kind::ResourceChange => "resource_change",
+            Kind::Stop(_) => KIND_STOP,
+            Kind::StatementQuery => "statement_query",
+            Kind::Unknown(word) => word,
+        }
+    }
+}
+
 /// A canonical decimal integer with an optional minus sign: the text of the number that
 /// `str(int(n))` gives in nodo (`statement_check._canonical`). So `007`, `-0` and `+5` are
 /// refused.
@@ -839,4 +864,47 @@ fn check_kept(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn the_name_of_a_kind_is_the_word_that_the_node_writes() {
+        // The words that need no detail: what the parser reads, the name gives back.
+        for word in [
+            "deposit",
+            "credit",
+            "debit",
+            "start",
+            "build",
+            "maintenance",
+            "top_up",
+            "withdrawal",
+            "refund",
+            "tunnel",
+            "resource_change",
+            "statement_query",
+        ] {
+            let movement = BalanceMovement {
+                kind: word.to_string(),
+                ..Default::default()
+            };
+            let kind = parse_kind(&movement, 0).unwrap();
+            assert_eq!(kind.name(), word);
+        }
+    }
+
+    #[test]
+    fn a_kind_that_is_not_known_keeps_its_word() {
+        assert_eq!(Kind::Unknown("a_new_kind".into()).name(), "a_new_kind");
+    }
+
+    #[test]
+    fn the_kinds_with_a_detail_have_their_words() {
+        assert_eq!(Kind::ChildStart.name(), "child_start");
+        assert_eq!(KIND_CHILD_BOUND, "child_bound");
+        assert_eq!(KIND_STOP, "stop");
+    }
 }
