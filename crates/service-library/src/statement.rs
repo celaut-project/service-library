@@ -224,7 +224,8 @@ impl Rates {
 #[derive(Clone, PartialEq, Eq)]
 pub struct StatementRequest {
     /// The token of an instance that the caller holds: the ancestor. Empty reads the
-    /// account of the client.
+    /// account of the caller: its own account, which the node finds by the address of a
+    /// service or by the `client_id` of a client.
     pub token: String,
     /// The descendant to read, by its `instance_ref`. Empty reads the account that
     /// `token` names.
@@ -589,9 +590,11 @@ impl VerifiedStatement {
 ///
 /// The account of the answer is checked only for a read with no `instance_ref`: it must be
 /// `account_ref(request.token)`. A read of a descendant has an account that the caller does
-/// not know by token, so the signed `instance_ref` stands in its place. A read of the
-/// account of the client (empty token) is checked by
-/// [`crate::gateway::get_balance_statement`], which knows the `client_id`.
+/// not know by token, so the signed `instance_ref` stands in its place. The account of a
+/// read with an empty token (the account of the caller) is not compared with anything: a
+/// service does not know its own token, and the caller of this function knows what it
+/// knows about itself. A later read is tied to the first by `kept`, as far as its rows show
+/// (see [`KeptHead`] and `check_kept`).
 pub fn verify(
     request: &StatementRequest,
     peer_id: &str,

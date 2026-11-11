@@ -25,7 +25,10 @@ use celaut_proto::celaut::{
 use prost::Message;
 use service_library::gateway::Gateway;
 use service_library::manager::{DependencyManager, Limits};
-use service_library::statement::{self, account_ref, genesis_hash, instance_ref, movement_hash};
+use service_library::statement::{
+    self, account_ref, genesis_hash, instance_ref, movement_hash, Rates, StatementError,
+    StatementRequest,
+};
 use service_library::verifier::{
     AccountState, Expectation, Finding, RefusalKind, Verifier, VerifierConfig, VerifierError,
 };
@@ -100,6 +103,7 @@ enum Mode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Read {
+    token: String,
     instance_ref: String,
     from_seq: u64,
     to_seq: u64,
@@ -196,6 +200,7 @@ impl Fake {
             format!("ref:{}", request.instance_ref)
         };
         self.reads.lock().unwrap().push(Read {
+            token: request.token.clone(),
             instance_ref: request.instance_ref.clone(),
             from_seq: request.from_seq,
             to_seq: request.to_seq,
@@ -1025,4 +1030,155 @@ async fn the_background_verifier_runs_at_once_and_stays_in_its_budget() {
             .any(|f| matches!(f, Finding::BudgetExhausted { .. })),
         "the budget ran out and it said so"
     );
+}
+
+// ─── The account of the service itself: an empty token ──────────────────────────────
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+async fn rates_of(gateway: &Gateway) -> Rates {
+    Rates::from_peer(&gateway.peer_info().await.unwrap()).unwrap()
+}
+
+fn read_of(token: &str, instance_ref: &str, from_seq: u64) -> StatementRequest {
+    StatementRequest {
+        token: token.to_string(),
+        instance_ref: instance_ref.to_string(),
+        from_seq,
+        to_seq: 0,
+        remaining_hops: 2,
+    }
+}
+
+#[tokio::test]
+async fn a_service_reads_its_own_account_with_an_empty_token() {
+    // The node reads the account of the caller when the token is empty: for a service, the
+    // one that it knows by its address. The library used to refuse the call before it was sent.
+    let fake = Fake::new();
+    fake.set("token:", vec![credit(1_000), credit(250)]);
+    let gateway = gateway(&fake).await;
+    let rates = rates_of(&gateway).await;
+
+    let read = gateway
+        .balance_statement(
+            &read_of("", "", 1),
+            PEER_ID,
+            &rates,
+            1_000_000,
+            None,
+            now_secs(),
+        )
+        .await
+        .expect("an empty token is the account of the caller");
+
+    assert_eq!(read.balance, 1_250);
+    assert_eq!(read.movements.len(), 2);
+    let reads = fake.reads.lock().unwrap();
+    assert_eq!(reads.len(), 1, "the call reached the node");
+    assert_eq!(reads[0].token, "", "and the token on the wire is empty");
+}
+
+#[tokio::test]
+async fn a_later_read_of_the_own_account_goes_on_from_the_kept_head() {
+    let fake = Fake::new();
+    fake.set("token:", vec![credit(1_000), credit(250)]);
+    let gateway = gateway(&fake).await;
+    let rates = rates_of(&gateway).await;
+    let first = gateway
+        .balance_statement(
+            &read_of("", "", 1),
+            PEER_ID,
+            &rates,
+            1_000_000,
+            None,
+            now_secs(),
+        )
+        .await
+        .unwrap();
+
+    // The account grows: the next read goes on from the head that the first one gave.
+    fake.push("token:", vec![credit(50)]);
+    let second = gateway
+        .balance_statement(
+            &read_of("", "", first.head.seq + 1),
+            PEER_ID,
+            &rates,
+            1_000_000,
+            Some(&first.head),
+            now_secs(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.balance, 1_300);
+
+    // The node shows another history at the seq that was kept: the read is refused, as it
+    // is for the account of an instance.
+    fake.set("token:", vec![credit(7), credit(7), credit(7)]);
+    let error = gateway
+        .balance_statement(
+            &read_of("", "", first.head.seq),
+            PEER_ID,
+            &rates,
+            1_000_000,
+            Some(&second.head),
+            now_secs(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StatementError::Invalid(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn an_empty_token_with_an_instance_ref_reads_a_descendant_of_the_caller() {
+    let fake = Fake::new();
+    let c = child("1");
+    fake.set(&format!("ref:{c}"), vec![credit(5_000)]);
+    let gateway = gateway(&fake).await;
+    let rates = rates_of(&gateway).await;
+
+    let read = gateway
+        .balance_statement(
+            &read_of("", &c, 1),
+            PEER_ID,
+            &rates,
+            1_000_000,
+            None,
+            now_secs(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read.balance, 5_000);
+    assert_eq!(fake.reads.lock().unwrap()[0].instance_ref, c);
+}
+
+#[tokio::test]
+async fn the_budget_and_the_other_checks_still_apply_to_an_empty_token() {
+    let fake = Fake::new();
+    fake.set("token:", vec![credit(1_000)]);
+    let gateway = gateway(&fake).await;
+    let rates = rates_of(&gateway).await;
+
+    let over = gateway
+        .balance_statement(&read_of("", "", 1), PEER_ID, &rates, 0, None, now_secs())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(over, StatementError::OverBudget { .. }),
+        "{over:?}"
+    );
+    assert!(fake.reads.lock().unwrap().is_empty(), "nothing was sent");
+
+    let mut no_hops = read_of("", "", 1);
+    no_hops.remaining_hops = 0;
+    let bad = gateway
+        .balance_statement(&no_hops, PEER_ID, &rates, 1_000_000, None, now_secs())
+        .await
+        .unwrap_err();
+    assert!(matches!(bad, StatementError::BadRequest(_)), "{bad:?}");
 }

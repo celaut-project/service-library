@@ -162,6 +162,15 @@ impl Gateway {
     /// account, and `now` the time of this service in Unix seconds. The answer is checked as
     /// [`crate::statement::verify`] says. A service has no `Client`: the instance token
     /// names the account. Use [`crate::verifier::Verifier`] to read and keep the state.
+    ///
+    /// An empty `request.token` reads the account of this service itself: the node knows the
+    /// caller by its address, as it does for every call that a service makes. The library
+    /// cannot check that the account of the answer is the one of this service, because a
+    /// service does not know its own token. The signature of the node, the hash chain and the
+    /// head are checked as always. `kept` ties a later read to the first as far as the read
+    /// shows: a head that goes back, or a row at the kept seq or just after it that does not
+    /// hang from the kept hash, is refused. A read that holds none of those rows cannot tell
+    /// that the node changed the account.
     pub async fn balance_statement(
         &self,
         request: &StatementRequest,
@@ -172,11 +181,6 @@ impl Gateway {
         now: i64,
     ) -> Result<VerifiedStatement, StatementError> {
         request.check()?;
-        if request.token.is_empty() {
-            return Err(StatementError::BadRequest(
-                "a service names an account by the token of an instance that it holds".into(),
-            ));
-        }
         let needed = request.max_mu_needed(rates);
         if needed > max_mu {
             return Err(StatementError::OverBudget {

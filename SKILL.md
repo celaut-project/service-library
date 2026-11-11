@@ -97,6 +97,15 @@ started and what it stopped: `DependencyManager::verify(&verifier)` reads them a
 the findings in `DependencyManager::findings`. `celaut verify --budget MU` does it for the
 instances of the pool; each run starts from the first movement.
 
+**Your own account.** `Gateway::balance_statement` with an empty `token` reads the account of
+this service itself: the node knows the caller by its address, so you need no token. Give a
+`StatementRequest` with `token: String::new()`, and keep the `head` of the answer for the next
+read. The library cannot check that the account of the answer is yours, because a service does
+not know its own token: it checks the signature of the node, the chain, the head and the balance,
+and `kept` ties a later read to the first as far as the rows of the read show. A read costs MU,
+as for any account. The `Verifier` and `celaut verify` read the instances that you hold; they do
+not read your own account.
+
 **Resources and networks.** `ConfigurationFile.initial_sysresources` gives the memory limit at
 the start (`NodeConfig::mem_limit`). To change it, `Gateway::modify_resources`: only a local
 instance may call it, the node takes a fee from the balance of the instance, and it answers
