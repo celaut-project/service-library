@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/celaut-proto", "crates/service-library", "crates/celaut-cli", "crates/e2e-client"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 # bee-rpc is GPL-3.0-only, and so is this library.
 license = "GPL-3.0-only"
