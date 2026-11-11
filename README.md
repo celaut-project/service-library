@@ -55,7 +55,7 @@ celaut shutdown                      # stop every instance, when the service end
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
-`metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
+`metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `account` (the signed statement of the own account of this service, within a `--budget` of MU), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines; `data` holds the fields of the event: the session, the packets with their peer, the notices), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.

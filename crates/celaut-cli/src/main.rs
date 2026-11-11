@@ -24,6 +24,7 @@ use service_library::package::{self, PackageInfo};
 use service_library::packer::Packer;
 use service_library::resources::Resizer;
 use service_library::skills::Skills;
+use service_library::statement::{KeptHead, StatementError};
 use service_library::verifier::{Expectation, Verifier, VerifierConfig, VerifierError};
 use service_library::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -53,6 +54,12 @@ Commands:
                                their children and grandchildren, and say what is wrong: an
                                instance that the node stopped, MU kept, a bad statement. A read
                                costs MU: it never reads more than the budget
+  account   --budget MU [--from-seq N] [--rows N (100)] [--to-seq N] [--head SEQ:HASH]
+                               the signed statement of THIS service's own account (no lease
+                               and no token): {balance_mu, head, keep, movements, ...}. With
+                               no --from-seq it reads only the head and the balance, the cheapest
+                               read. --head ties the read to an earlier one: pass the `keep` of
+                               its answer. A read costs MU: it never reads more than --budget
   pack      <lease> <project.zip> --out FILE [--wait SECS (60)] [--uri IP:PORT]
                                pack a project with the packer service (the instance of
                                <lease>, or --uri): {service, path, size}
@@ -918,6 +925,61 @@ async fn run(args: Args) -> Res<Value> {
                 "instances": reports,
             }))
         }
+        "account" => {
+            let budget = args.number::<u128>("budget")?.ok_or_else(|| {
+                usage("account needs --budget MU: a read of a statement costs MU".to_string())
+            })?;
+            let from_seq = args.number::<u64>("from-seq")?.unwrap_or(0);
+            let rows = args.number::<u64>("rows")?.unwrap_or(100).max(1);
+            let to_seq = match args.number::<u64>("to-seq")? {
+                Some(to) => to,
+                // No range: the head only. A start: that many rows, and not all of them.
+                None if from_seq == 0 => 0,
+                None => from_seq + rows - 1,
+            };
+            let kept = args.value("head").map(parse_head).transpose()?;
+            let verifier = Verifier::connect(ctx.gateway()?, VerifierConfig::with_budget(budget))
+                .await
+                .map_err(|e| match e {
+                    VerifierError::Node(e) => Fail::Library(e),
+                    other => Fail::Other(other.to_string()),
+                })?;
+            let read = verifier
+                .read_own_account(from_seq, to_seq, kept.as_ref())
+                .await
+                .map_err(statement_fail)?;
+            let movements: Vec<Value> = read
+                .movements
+                .iter()
+                .map(|m| {
+                    json!({
+                        "seq": m.seq,
+                        "ts": m.ts,
+                        "kind": m.kind.name(),
+                        "amount_mu": m.amount.to_string(),
+                        "balance_after_mu": m.balance_after.to_string(),
+                        "instance_ref": m.instance_ref,
+                        "detail": m.detail,
+                        "hash": m.hash,
+                    })
+                })
+                .collect();
+            let (spent, left) = verifier.budget();
+            Ok(json!({
+                "account_ref": read.statement.account_ref,
+                "balance_mu": read.balance.to_string(),
+                "head": { "seq": read.head.seq, "hash": read.head.hash },
+                // What `--head` takes in the next read.
+                "keep": format!("{}:{}", read.head.seq, read.head.hash),
+                "movements": movements,
+                "next_from_seq": read.next_from_seq,
+                "gap": read.gap,
+                "relayed": read.relayed,
+                "identity_pinned": verifier.identity_pinned(),
+                "spent_mu": spent,
+                "budget_left_mu": left,
+            }))
+        }
         "deposit" => {
             let token = ctx.token(args.lease()?)?;
             let text = args.word(2, "the MU to move")?;
@@ -1071,6 +1133,34 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => report(e),
+    }
+}
+
+/// `SEQ:HASH`, the head that an earlier read gave (`keep`).
+fn parse_head(text: &str) -> Res<KeptHead> {
+    let bad = || usage(format!("--head {text:?} is not SEQ:HASH"));
+    let (seq, hash) = text.split_once(':').ok_or_else(bad)?;
+    let seq = seq.parse::<u64>().map_err(|_| bad())?;
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(bad());
+    }
+    Ok(KeptHead {
+        seq,
+        hash: hash.to_string(),
+    })
+}
+
+/// A refused or failed read of a statement, as the command tells it: a node that does not
+/// answer is exit code 3, a request that is wrong is 2, anything else is 1.
+fn statement_fail(error: StatementError) -> Fail {
+    match error {
+        StatementError::Wire(e) => Fail::Library(e),
+        StatementError::BadRequest(m) => usage(m),
+        other => Fail::Other(other.to_string()),
     }
 }
 

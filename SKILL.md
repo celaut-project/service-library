@@ -103,8 +103,12 @@ this service itself: the node knows the caller by its address, so you need no to
 read. The library cannot check that the account of the answer is yours, because a service does
 not know its own token: it checks the signature of the node, the chain, the head and the balance,
 and `kept` ties a later read to the first as far as the rows of the read show. A read costs MU,
-as for any account. The `Verifier` and `celaut verify` read the instances that you hold; they do
-not read your own account.
+as for any account. `Verifier::read_own_account(from_seq, to_seq, kept)` does it within the
+budget of the verifier (0 and 0 reads only the head and the balance, the cheapest read). With the
+command: `celaut account --budget MU [--from-seq N] [--rows N (100)] [--head SEQ:HASH]`. It
+prints `balance_mu`, the `head`, the typed `movements` and a `keep` (`SEQ:HASH`) that you give
+back as `--head` in the next read; with no `--from-seq` it reads only the head and the balance.
+`Verifier::check` and `celaut verify` read the instances that you hold, not your own account.
 
 **Resources and networks.** `ConfigurationFile.initial_sysresources` gives the memory limit at
 the start (`NodeConfig::mem_limit`). To change it, `Gateway::modify_resources`: only a local

@@ -794,3 +794,90 @@ async fn notice_shutdown_with_an_empty_pool_needs_no_gateway() {
     assert_eq!(line["leaked"], 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_reads_the_own_account_of_the_service_with_no_lease() {
+    let (_, dir) = node().await;
+
+    // No lease and no instance in the pool: the account is the one of this service.
+    let (code, head) = celaut(&dir, &["account", "--budget", "100000"]).await;
+    assert_eq!(code, 0, "{head}");
+    assert_eq!(head["balance_mu"], "42");
+    assert_eq!(head["head"]["seq"], 1);
+    assert_eq!(
+        head["movements"].as_array().unwrap().len(),
+        0,
+        "the head only"
+    );
+    assert_eq!(head["identity_pinned"], false);
+    assert_eq!(
+        head["keep"].as_str().unwrap(),
+        format!("1:{}", head["head"]["hash"].as_str().unwrap())
+    );
+    let spent = head["spent_mu"].as_u64().unwrap();
+    assert!(spent > 0 && spent + head["budget_left_mu"].as_u64().unwrap() == 100_000);
+
+    // A range gives the movements, typed.
+    let (code, rows) = celaut(&dir, &["account", "--budget", "100000", "--from-seq", "1"]).await;
+    assert_eq!(code, 0, "{rows}");
+    let movements = rows["movements"].as_array().unwrap();
+    assert_eq!(movements.len(), 1);
+    assert_eq!(movements[0]["kind"], "credit");
+    assert_eq!(movements[0]["amount_mu"], "42");
+    assert_eq!(movements[0]["balance_after_mu"], "42");
+    assert_eq!(movements[0]["seq"], 1);
+
+    // The pinned identity.
+    let (code, pinned) = celaut(
+        &dir,
+        &["--peer-id", PEER_ID, "account", "--budget", "100000"],
+    )
+    .await;
+    assert_eq!(code, 0, "{pinned}");
+    assert_eq!(pinned["identity_pinned"], true);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_ties_a_later_read_to_the_head_that_the_first_one_gave() {
+    let (_, dir) = node().await;
+    let (_, first) = celaut(&dir, &["account", "--budget", "100000"]).await;
+    let keep = first["keep"].as_str().unwrap().to_string();
+
+    let (code, again) = celaut(&dir, &["account", "--budget", "100000", "--head", &keep]).await;
+    assert_eq!(code, 0, "{again}");
+
+    // The node shows another hash at the seq that was kept: the read is refused.
+    let wrong = format!("1:{}", "0".repeat(64));
+    let (code, error) = celaut(&dir, &["account", "--budget", "100000", "--head", &wrong]).await;
+    assert_eq!(code, 1, "{error}");
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid statement"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_needs_a_budget_and_never_reads_beyond_it() {
+    let (_, dir) = node().await;
+
+    let (code, error) = celaut(&dir, &["account"]).await;
+    assert_eq!(code, 2, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("--budget"));
+
+    let (code, error) = celaut(&dir, &["account", "--budget", "0"]).await;
+    assert_eq!(code, 1, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("budget"));
+
+    for bad in [
+        "nonsense",
+        "x:abc",
+        "1:short",
+        &format!("1:{}", "G".repeat(64)),
+    ] {
+        let (code, error) = celaut(&dir, &["account", "--budget", "100000", "--head", bad]).await;
+        assert_eq!(code, 2, "{bad}: {error}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
