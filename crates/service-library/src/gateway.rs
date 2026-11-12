@@ -365,6 +365,8 @@ impl Gateway {
             max_sysreq: Some(max),
             // No token: the node changes the local instance that sends the request.
             service_token: String::new(),
+            // No device change: the instance keeps its devices.
+            devices: None,
         };
         let answer = self
             .call(

@@ -349,6 +349,14 @@ pub mod service {
         /// node stops the service at once, with no notice.
         #[prost(message, optional, tag = "8")]
         pub notice_declaration: ::core::option::Option<container::NoticeDeclaration>,
+        /// The devices that the node attaches directly to the instance. Repeat the entry
+        /// for each device that the service needs. If the list is not empty, the
+        /// resources of the instance must have the same at_init and at_most, because the
+        /// node cannot change the memory of an instance that has devices. A node that has
+        /// no free devices of these architectures refuses to start the service. A device
+        /// is available only with the native architecture of the node.
+        #[prost(message, repeated, tag = "9")]
+        pub devices: ::prost::alloc::vec::Vec<super::Device>,
     }
     /// Nested message and enum types in `Container`.
     pub mod container {
@@ -603,6 +611,12 @@ pub struct ConfigurationFile {
     /// The resources of the instance at the start.
     #[prost(message, optional, tag = "4")]
     pub initial_sysresources: ::core::option::Option<Sysresources>,
+    /// The devices that the node attached to the instance at the start, each with its id
+    /// and its PCI address in the guest. Empty if the instance has no devices. A device
+    /// that the node attaches after the start is not here: the answer of
+    /// ModifyServiceSystemResources gives it.
+    #[prost(message, repeated, tag = "5")]
+    pub devices: ::prost::alloc::vec::Vec<AttachedDevice>,
 }
 /// Nested message and enum types in `ConfigurationFile`.
 pub mod configuration_file {
@@ -651,8 +665,10 @@ pub struct Sysresources {
     /// score of the smallest larger size that it measured. If it has no such score, it
     /// does not apply that minimum. In Service.Container.Resources.at_init (also in the
     /// service of a Service.Workload) and in a GetResourceAvailability
-    /// request, the values are the minimum. In Peer.resources, they are the scores that the node
-    /// measured. In Service.Container.Resources.at_most, they have no meaning.
+    /// request, the values are the minimum. In Device.resources.at_init, they are
+    /// the minimum score of the device. In Peer.resources and in the at_most of Peer.devices,
+    /// they are the scores that the node measured. In the at_most of a service
+    /// (Service.Container.Resources and Device.resources), they have no meaning.
     #[prost(message, repeated, tag = "99")]
     pub benchmark: ::prost::alloc::vec::Vec<Uint64KeyValue>,
 }
@@ -813,6 +829,95 @@ pub mod activity_window {
         pub end_minute: i32,
     }
 }
+/// A device that the node attaches directly to the instance, for example a GPU. The
+/// node attaches the device to the virtual machine, and the service brings the
+/// kernel module, the firmware and the userspace driver. One Device is one
+/// physical device. A service that needs two devices has two Device entries. The
+/// node gives one device to one instance only, and keeps it exclusive until the
+/// instance stops or hibernates.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Device {
+    /// The architecture of the device. A device has one architecture. The tags are
+    /// synonyms of that one architecture, never alternatives. A device matches when
+    /// its tags and the tags of the architecture of the entry have at least one
+    /// tag in common. A tag is the chip and the guest kernel together:
+    /// "pci:<vendor>:<device>+<algorithm>:<hash>". <vendor> and <device> are the
+    /// PCI identifiers of the chip, in lowercase hexadecimal. <algorithm> is the
+    /// identifier of a hash algorithm: the lowercase hexadecimal output of that
+    /// algorithm for an empty input. <hash> is the output of that algorithm for the
+    /// file of the guest kernel, in lowercase hexadecimal. One kernel can have more
+    /// than one tag, one for each algorithm. A service that must run on more than
+    /// one architecture is a set of services, one for each architecture. A Device
+    /// with no tags is not valid. Here an empty architecture does not mean the
+    /// native architecture.
+    #[prost(message, optional, tag = "1")]
+    pub architecture: ::core::option::Option<service::container::Architecture>,
+    /// The resources that the service needs from the device, with the same meaning
+    /// as in Container.resources. The at_init mem_limit is the memory of the device
+    /// that the instance needs at the start, and the at_most mem_limit is the most
+    /// that it can grow to. Its benchmark gives the minimum score of the device,
+    /// with keys for the device, for example "fp32_flops". The other fields have no
+    /// meaning here. A node can give a device whose memory cannot change. Then it
+    /// gives the at_most memory, and at_init must not be more than at_most.
+    #[prost(message, optional, tag = "2")]
+    pub resources: ::core::option::Option<service::container::Resources>,
+    /// The ways in which the node can attach the device. In a service: the ways
+    /// that the service accepts. The node uses the first one in the list that it
+    /// supports, and refuses the service if it supports none. With
+    /// ATTACH_ON_REQUEST the node does not attach the device at the start. In
+    /// Peer.devices: all the ways that the node can attach that device. If the list
+    /// is empty, it is the same as only ATTACH_AT_START. A reader keeps a value
+    /// that it does not know, and does not use it.
+    #[prost(enumeration = "device::Attach", repeated, tag = "3")]
+    pub attach: ::prost::alloc::vec::Vec<i32>,
+}
+/// Nested message and enum types in `Device`.
+pub mod device {
+    /// When the node attaches the device to the instance.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Attach {
+        /// The node attaches the device before the instance starts, and the
+        /// instance has it until it stops or hibernates. This is the only value
+        /// that a node must support.
+        AtStart = 0,
+        /// The node attaches the device when the instance asks for it with
+        /// ModifyServiceSystemResources, and the entry only gives the most that
+        /// the instance can ask for. A node that cannot do this refuses to start
+        /// the service. It never attaches the device at the start instead.
+        OnRequest = 1,
+    }
+    impl Attach {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::AtStart => "ATTACH_AT_START",
+                Self::OnRequest => "ATTACH_ON_REQUEST",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "ATTACH_AT_START" => Some(Self::AtStart),
+                "ATTACH_ON_REQUEST" => Some(Self::OnRequest),
+                _ => None,
+            }
+        }
+    }
+}
 /// The resources for one architecture. In Peer.resources: the most that the node
 /// supports for that architecture, with its measured benchmark scores. In a
 /// GetResourceAvailability request: the resources asked about. In that request, the
@@ -827,6 +932,20 @@ pub struct ArchitectureResources {
     /// The resources. There is no start and maximum pair here.
     #[prost(message, optional, tag = "2")]
     pub resources: ::core::option::Option<Sysresources>,
+}
+/// The request of GetResourceAvailability: the resources asked about.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ResourceAvailabilityRequest {
+    /// The main architecture and its resources, as in Container.architecture and
+    /// Container.resources.
+    #[prost(message, optional, tag = "1")]
+    pub main: ::core::option::Option<ArchitectureResources>,
+    /// The devices that the instance needs, one entry for each device, with the same
+    /// meaning as in Container.devices, also the attach value. A node that cannot attach
+    /// a device as the entry says answers that it cannot run the instance. The
+    /// architecture of each entry must have tags.
+    #[prost(message, repeated, tag = "2")]
+    pub devices: ::prost::alloc::vec::Vec<Device>,
 }
 /// The answer of GetResourceAvailability.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -952,7 +1071,8 @@ pub struct BalanceMovement {
     /// The balance after the movement, in MU.
     #[prost(message, optional, tag = "4")]
     pub balance_after: ::core::option::Option<Amount>,
-    /// What the movement is: "deposit" (a payment), "credit" (MU that nobody paid in),
+    /// What the movement is: "deposit" (a payment on a ledger: of a client, or of the
+    /// instance for its own balance), "credit" (MU that nobody paid in),
     /// "debit" (the operator took MU), "start" (the initial_mu that the instance got),
     /// "build", "maintenance" (one period), "child_start" (the account paid the start of a child), "child_bound" (the
     /// child of a child_start exists; moves nothing), "top_up", "withdrawal", "refund"
@@ -980,7 +1100,11 @@ pub struct BalanceMovement {
     /// carry. For a tunnel: "open" or "bytes", "execution_name", and "session", the
     /// receipt stream of the tunnel when the caller asked for receipts. For a stop:
     /// "reason", the death reason of the instance, and "leftover", the MU that the
-    /// refund took out of the account.
+    /// refund took out of the account. A movement that a party asked for has "actor":
+    /// "operator" (the operator of the node), "client" or "instance". For a top_up or a withdrawal, the
+    /// actor is the father of the instance. A resource_change that hibernates an instance
+    /// has "action": "hibernate". A movement with no "actor" is one that the node wrote
+    /// by its own rule.
     #[prost(string, tag = "7")]
     pub detail: ::prost::alloc::string::String,
     /// The hash of the movement before this one. For the first movement, the genesis
@@ -1254,6 +1378,21 @@ pub struct Peer {
     /// is the authority for one instance.
     #[prost(message, optional, tag = "9")]
     pub activity_window: ::core::option::Option<ActivityWindow>,
+    /// The devices that the node can attach directly to an instance. One entry is one
+    /// device, with its architecture. The node repeats an entry for each device that it
+    /// has. The number of entries with the same architecture is the maximum number of
+    /// devices that the node can give at the same time with that architecture. A reader
+    /// does not add the numbers of different architectures: one device with two kernels
+    /// is one device. If the list is empty, the node has no devices to give. In the
+    /// resources of an entry, only at_most has a value. Its limits are the most that the
+    /// device can give, and its benchmark has the scores that the node measured. If the
+    /// node did not measure a score, the score is absent, never 0. The attach list has
+    /// all the ways that the node can attach that device. The values are a limit of
+    /// capacity, not the free capacity now. GetResourceAvailability gives the real answer. This list is not
+    /// Peer.resources: a reader does not read a device architecture as a main
+    /// architecture.
+    #[prost(message, repeated, tag = "10")]
+    pub devices: ::prost::alloc::vec::Vec<Device>,
     /// The unix time of the announcement, in seconds. A reader accepts a Peer only if its
     /// ts is more than the ts of the last Peer that it accepted for the same public_key.
     #[prost(int64, tag = "99")]
@@ -1509,6 +1648,34 @@ pub struct AssociateClientOutput {
     #[prost(string, tag = "2")]
     pub reason: ::prost::alloc::string::String,
 }
+/// A device that is attached to an instance now.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttachedDevice {
+    /// The identifier of the device for this instance. The node makes it when it
+    /// attaches the device. It stays the same until the node detaches the device. An id
+    /// is not valid for another instance.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// The architecture and the resources of the device.
+    #[prost(message, optional, tag = "2")]
+    pub device: ::core::option::Option<ArchitectureResources>,
+    /// The PCI address of the device in the guest. The service finds the device with it.
+    #[prost(string, tag = "3")]
+    pub guest_address: ::prost::alloc::string::String,
+}
+/// A change of the devices of an instance. The node never changes a device that the
+/// change does not name.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeviceChange {
+    /// Devices to attach. One entry is one new device. The limits are the most that the
+    /// instance can grow to, as in ArchitectureResources.
+    #[prost(message, repeated, tag = "1")]
+    pub attach: ::prost::alloc::vec::Vec<ArchitectureResources>,
+    /// The ids (AttachedDevice.id) of the devices to detach. The service must have
+    /// released each device in the guest before it asks. An unknown id is an error.
+    #[prost(string, repeated, tag = "2")]
+    pub detach: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// The answer of ModifyServiceSystemResources.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ModifyServiceSystemResourcesOutput {
@@ -1518,6 +1685,10 @@ pub struct ModifyServiceSystemResourcesOutput {
     /// The balance of the instance, in MU.
     #[prost(message, optional, tag = "2")]
     pub balance: ::core::option::Option<Amount>,
+    /// The devices that the instance has now, also the ones that the node attached at
+    /// the start. Empty if the instance has none.
+    #[prost(message, repeated, tag = "3")]
+    pub devices: ::prost::alloc::vec::Vec<AttachedDevice>,
 }
 /// The request of ModifyServiceSystemResources.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1541,6 +1712,13 @@ pub struct ModifyServiceSystemResourcesInput {
     /// finds by the address of the caller.
     #[prost(string, tag = "3")]
     pub service_token: ::prost::alloc::string::String,
+    /// A change of the devices of the instance. It is only for the entries of
+    /// Container.devices that have ATTACH_ON_REQUEST. If it is not set, the instance
+    /// keeps all its devices. The node never detaches a device that has ATTACH_AT_START
+    /// while the instance runs. A node that cannot attach a device after the start
+    /// refuses a request that sets this field, and never ignores it.
+    #[prost(message, optional, tag = "4")]
+    pub devices: ::core::option::Option<DeviceChange>,
 }
 /// The request of ModifyDeposit.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

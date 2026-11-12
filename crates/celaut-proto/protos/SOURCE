@@ -1,2 +1,2 @@
-celaut-project/nodo 4074f4e749bba305f40898d5152dbefa9ca06d0a protos/celaut.proto (dev, after nodo#646: the notice, nodo#645)
+celaut-project/nodo 60458d84b2348b554c05a13b5d4a3373db01c440 protos/celaut.proto (dev, after nodo#536 devices, nodo#630 own deposit, statements with actor)
 celaut-project/nodo aa37eae46d2de02a4a1f5a89874f63023ed4bce5 protos/buffer.proto
