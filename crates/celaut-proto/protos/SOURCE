@@ -1,2 +1,2 @@
-celaut-project/nodo 60458d84b2348b554c05a13b5d4a3373db01c440 protos/celaut.proto (dev, after nodo#536 devices, nodo#630 own deposit, statements with actor)
+celaut-project/nodo 54f3531d71a10e8087169a8604b87d6bfd3f98c9 protos/celaut.proto (dev, after nodo#419 the start receipt that names the reserved resources)
 celaut-project/nodo aa37eae46d2de02a4a1f5a89874f63023ed4bce5 protos/buffer.proto

@@ -1301,6 +1301,33 @@ pub struct ExecutionReceipt {
     /// that the node signs. A receipt without a valid signature is not valid.
     #[prost(string, tag = "24")]
     pub signature: ::prost::alloc::string::String,
+    /// Only in "start". What the node reserved for the instance at the start: the
+    /// resolved figures, with the floors of the node applied, and not what the manifest
+    /// declared. They are what the maintenance charge prices. The values are those of
+    /// Sysresources, with the same units. Zero in a start that the node gave to a peer:
+    /// the executor reserved them and this node does not attest them. This is the CFS CPU
+    /// period that the node reserved, in microseconds.
+    #[prost(uint64, tag = "25")]
+    pub cpu_period: u64,
+    /// Only in "start". The CFS CPU quota that the node reserved, in microseconds.
+    #[prost(uint64, tag = "26")]
+    pub cpu_quota: u64,
+    /// Only in "start". The memory limit that the node reserved, in bytes.
+    #[prost(uint64, tag = "27")]
+    pub mem_limit: u64,
+    /// Only in "start". The disk space that the node reserved, in bytes.
+    #[prost(uint64, tag = "28")]
+    pub disk_space: u64,
+    /// Only in "start". The guest kernel that the instance boots, as the SHA-256 hex
+    /// with which the kernel store of the node keeps it. A device tag fixes it. Empty
+    /// if the node does not know it (a start that the node gave to a peer).
+    #[prost(string, tag = "29")]
+    pub kernel: ::prost::alloc::string::String,
+    /// Only in "start". The chip of each device that the node attached at the start,
+    /// sorted. Empty if the instance has no devices, and in a start that the node gave to a
+    /// peer.
+    #[prost(string, repeated, tag = "30")]
+    pub devices: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// The answer of StartService.
 #[derive(Clone, PartialEq, ::prost::Message)]
