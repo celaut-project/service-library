@@ -310,8 +310,13 @@ fn scheme_is_ours(scheme: Option<&SignatureScheme>) -> bool {
 /// | hex(plane) | session | hex(slot) | seq
 /// | in_events | in_bytes | in_head | out_events | out_bytes | out_head
 /// | hex(mu_charged.n) | hex(coverage) | hex(capture_mode) | hex(degraded_reason)
+/// | cpu_period | cpu_quota | mem_limit | disk_space | kernel | hex(device)/hex(device)...
 /// | blake2b_256_hex(UTF-8(canonical_scheme(signature_scheme)))
 /// ```
+///
+/// The five numbers and the kernel are what a `start` receipt says that the node
+/// reserved (nodo commit 425ba843); they are `0` or empty in the other kinds. `devices`
+/// is sorted ([`problems`] refuses another order), each chip in hex, joined by `/`.
 pub fn canonical_receipt(r: &ExecutionReceipt) -> String {
     let (service_type, service_value) = r
         .service_id
@@ -348,6 +353,16 @@ pub fn canonical_receipt(r: &ExecutionReceipt) -> String {
         hex_text(&r.coverage),
         hex_text(&r.capture_mode),
         hex_text(&r.degraded_reason),
+        r.cpu_period.to_string(),
+        r.cpu_quota.to_string(),
+        r.mem_limit.to_string(),
+        r.disk_space.to_string(),
+        r.kernel.clone(),
+        r.devices
+            .iter()
+            .map(|d| hex_text(d))
+            .collect::<Vec<_>>()
+            .join("/"),
         blake2b_256_hex(scheme.as_bytes()),
     ]
     .join("|")
@@ -378,7 +393,17 @@ pub fn sign_with_seed(r: &mut ExecutionReceipt, seed: &[u8; 32]) -> Result<(), S
 
 /// The signed fields that only some kinds or planes use. A field that a receipt does
 /// not use must be empty or zero.
-const START_FIELDS: [&str; 3] = ["service_id", "envs_digest", "initial_mu"];
+const START_FIELDS: [&str; 9] = [
+    "service_id",
+    "envs_digest",
+    "initial_mu",
+    "cpu_period",
+    "cpu_quota",
+    "mem_limit",
+    "disk_space",
+    "kernel",
+    "devices",
+];
 const STREAM_FIELDS: [&str; 14] = [
     "plane",
     "session",
@@ -409,6 +434,12 @@ fn is_set(r: &ExecutionReceipt, field: &str) -> bool {
             .is_some_and(|s| !s.r#type.is_empty() || !s.value.is_empty()),
         "envs_digest" => !r.envs_digest.is_empty(),
         "initial_mu" => amount(&r.initial_mu),
+        "cpu_period" => r.cpu_period != 0,
+        "cpu_quota" => r.cpu_quota != 0,
+        "mem_limit" => r.mem_limit != 0,
+        "disk_space" => r.disk_space != 0,
+        "kernel" => !r.kernel.is_empty(),
+        "devices" => !r.devices.is_empty(),
         "plane" => !r.plane.is_empty(),
         "session" => !r.session.is_empty(),
         "slot" => !r.slot.is_empty(),
@@ -460,10 +491,17 @@ pub fn problems(r: &ExecutionReceipt, peer_id: Option<&str>, token: Option<&str>
         ("envs_digest", &r.envs_digest),
         ("in_head", &r.in_head),
         ("out_head", &r.out_head),
+        ("kernel", &r.kernel),
     ] {
         if !value.is_empty() && !is_hex(value, Some(DIGEST_HEX_LEN)) {
             found.push(format!("{field} is not a 64-hex digest"));
         }
+    }
+    if r.devices.windows(2).any(|w| w[0] >= w[1]) {
+        found.push("devices is not sorted and without repeats".into());
+    }
+    if r.devices.iter().any(String::is_empty) {
+        found.push("devices has an empty chip".into());
     }
     if !r.session.is_empty() && !is_hex(&r.session, None) {
         found.push("session is not lowercase hex".into());
@@ -895,20 +933,21 @@ mod tests {
         "|e684ff3022c2a14c62addd0129cd4a5d3dc95b2d13a924ce4fc57aa7e9842a45",
         "|3132333435363738",
         "||||0|0|0||0|0||||||",
+        "0|0|0|0|||",
         "94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
     );
-    const START_DIGEST: &str = "59ecb3f5e113da7bb9f76d41059a183bfd7d355e9ba32a53d848826be5502531";
+    const START_DIGEST: &str = "aca2b1b82e63e56dbde1a11d1720eac825ca5f9ebe4212ec3a7e9530e11e482f";
     const START_SIGNATURE: &str = concat!(
-        "f79ac345e0d9290dd803edf6b90cf16ef2680ba4353cf44f9a825b38b47be96c",
-        "de20b2d09453e24c965a25bbe1b846b7256fbc53fe79f921e88e70d967aa3d0b",
+        "ba72e35cc326195330929376de641970bd4bfb9c097d60498bffa174939a91ed",
+        "1d13a6f59adb474bc4943fd4573479c1322d77ea399104b5bc9814289b3d390d",
     );
     const IN_HEAD: &str = "4cc36e6c5ce771828a06755610180b0db14686b7b88ec9aca2d94dc67cb82b58";
     const OUT_HEAD: &str = "721ba2dbda02e1f8d3f9bf151175163f77ece18af91d85a2357a438d36f2ed85";
     const CHECKPOINT_DIGEST: &str =
-        "94157eae3e1f9aef97bd3347e33e9ed85db5b8c515253881a55e5763f8f2b840";
+        "9b70d9fc991f69e5cc3a06e39d860ad00abefc55bba3e42f4b5e08a621f5f0a4";
     const CHECKPOINT_SIGNATURE: &str = concat!(
-        "98bbc219739d19bc7663f99ae68e46d198795cad15d2e9fc5ddd9a8c6b47aef7",
-        "a4320777ed11f2d9ffd6fb43c40520e32f14be82193ab64b6cdc6ab74ee6900b",
+        "3bc5472ebb40bbb1d1aef20d811a481873b9828c517c07040189f7237ed90176",
+        "c646748d6a82f8274e37560ed9ff30f7280ec82ea50d60630cc022e8de35ad03",
     );
     const CHECKPOINT_CANONICAL: &str = concat!(
         "636865636b706f696e74",
@@ -925,6 +964,7 @@ mod tests {
         "|37",
         "|636c69656e742d74756e6e656c",
         "||",
+        "|0|0|0|0||",
         "|94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
     );
 
@@ -1464,5 +1504,242 @@ mod tests {
         let cp = checkpoint_with(KIND_CHECKPOINT, 1, &[b"ping"], &[b"pong"], "7");
         let faults = check_start(&cp, Some(PEER_ID), TOKEN, &service_id(), &sent_envs(), None);
         assert!(!faults.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod node_vectors {
+    //! Receipts that the real nodo code signed (`nodo:src/identity/execution_receipt.py`,
+    //! `start_receipt` and `ReceiptChain`, with the key `000102..1f`). The file is made
+    //! by a script that imports the node, so these are bytes from the node and not from
+    //! this port. The start receipts carry what the node reserved (cpu, memory, disk,
+    //! kernel and devices, nodo commit 425ba843); the old text did not cover them and
+    //! `verify` refused every start receipt of the node ("the signature does not
+    //! verify").
+
+    use super::*;
+    use celaut_proto::celaut::metadata::hash_tag::Hash;
+    use celaut_proto::celaut::Amount;
+    use serde_json::Value;
+
+    fn load() -> Value {
+        serde_json::from_str(include_str!("../tests/data/node_receipts.json")).unwrap()
+    }
+
+    fn text(v: &Value, k: &str) -> String {
+        v[k].as_str().unwrap().to_string()
+    }
+
+    fn number(v: &Value, k: &str) -> u64 {
+        v[k].as_u64().unwrap()
+    }
+
+    fn amount(v: &Value, k: &str) -> Option<Amount> {
+        let n = text(v, k);
+        (!n.is_empty()).then_some(Amount { n })
+    }
+
+    /// The receipt as the node sent it, field by field, with its signature.
+    fn receipt(v: &Value) -> ExecutionReceipt {
+        let kind = text(v, "kind");
+        ExecutionReceipt {
+            peer_id: text(v, "peer_id"),
+            execution_name: text(v, "execution_name"),
+            ts: v["ts"].as_i64().unwrap(),
+            service_id: (kind == KIND_START).then(|| Hash {
+                r#type: hex::decode(text(v, "service_id_type")).unwrap(),
+                value: hex::decode(text(v, "service_id_value")).unwrap(),
+            }),
+            envs_digest: text(v, "envs_digest"),
+            envs_salt: hex::decode(text(v, "envs_salt")).unwrap(),
+            initial_mu: amount(v, "initial_mu"),
+            plane: text(v, "plane"),
+            session: text(v, "session"),
+            slot: text(v, "slot"),
+            seq: number(v, "seq"),
+            in_events: number(v, "in_events"),
+            in_bytes: number(v, "in_bytes"),
+            in_head: text(v, "in_head"),
+            out_events: number(v, "out_events"),
+            out_bytes: number(v, "out_bytes"),
+            out_head: text(v, "out_head"),
+            mu_charged: amount(v, "mu_charged"),
+            coverage: text(v, "coverage"),
+            capture_mode: text(v, "capture_mode"),
+            degraded_reason: text(v, "degraded_reason"),
+            cpu_period: number(v, "cpu_period"),
+            cpu_quota: number(v, "cpu_quota"),
+            mem_limit: number(v, "mem_limit"),
+            disk_space: number(v, "disk_space"),
+            kernel: text(v, "kernel"),
+            devices: v["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d.as_str().unwrap().to_string())
+                .collect(),
+            signature: text(v, "signature"),
+            signature_scheme: Some(receipt_scheme()),
+            kind,
+        }
+    }
+
+    const NAMES: [&str; 5] = [
+        "start_resources_kernel",
+        "start_devices",
+        "start_bare",
+        "checkpoint",
+        "close",
+    ];
+
+    #[test]
+    fn the_signature_of_the_node_verifies_for_every_kind() {
+        let all = load();
+        for name in NAMES {
+            let r = receipt(&all[name]);
+            assert_eq!(
+                canonical_receipt(&r),
+                text(&all[name], "canonical"),
+                "{name}"
+            );
+            assert_eq!(receipt_digest(&r), text(&all[name], "digest"), "{name}");
+            assert_eq!(problems(&r, None, None), Vec::<String>::new(), "{name}");
+            assert!(verify(&r, Some(&r.peer_id), None), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_start_receipt_with_resources_keeps_them() {
+        let all = load();
+        let r = receipt(&all["start_resources_kernel"]);
+        assert_eq!(
+            (r.cpu_period, r.cpu_quota, r.mem_limit, r.disk_space),
+            (100000, 200000, 536870912, 1073741824)
+        );
+        assert!(r.devices.is_empty());
+        // Each of the new fields is signed.
+        type Change = fn(&mut ExecutionReceipt);
+        let changes: [(&str, Change); 6] = [
+            ("cpu_period", |r| r.cpu_period += 1),
+            ("cpu_quota", |r| r.cpu_quota += 1),
+            ("mem_limit", |r| r.mem_limit += 1),
+            ("disk_space", |r| r.disk_space += 1),
+            ("kernel", |r| r.kernel.replace_range(0..1, "0")),
+            ("devices", |r| r.devices.push("ffff:ffff".into())),
+        ];
+        for (field, change) in changes {
+            let mut t = r.clone();
+            change(&mut t);
+            assert!(!verify(&t, None, None), "{field}");
+        }
+    }
+
+    #[test]
+    fn the_devices_are_signed_sorted_and_joined_by_a_slash() {
+        let all = load();
+        let r = receipt(&all["start_devices"]);
+        assert!(verify(&r, None, None));
+        assert_eq!(r.devices, ["10de:1ad0", "10de:2204"]);
+        assert!(text(&all["start_devices"], "canonical")
+            .contains("|313064653a31616430/313064653a32323034|"));
+        assert!(verify(&r, None, None));
+    }
+
+    const SEED: [u8; 32] = [7; 32];
+
+    fn signed_with_seed(mut r: ExecutionReceipt) -> ExecutionReceipt {
+        sign_with_seed(&mut r, &SEED).unwrap();
+        r
+    }
+
+    fn reserved_start() -> ExecutionReceipt {
+        let all = load();
+        let mut r = receipt(&all["start_resources_kernel"]);
+        r.devices = vec!["10de:1ad0".into(), "10de:2204".into()];
+        signed_with_seed(r)
+    }
+
+    #[test]
+    fn a_start_with_resources_kernel_and_devices_signs_and_verifies() {
+        let r = reserved_start();
+        assert!(canonical_receipt(&r).contains("|100000|200000|536870912|1073741824|"));
+        assert_eq!(problems(&r, None, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_new_fields_go_after_degraded_reason_and_before_the_scheme() {
+        let mut r = reserved_start();
+        r.degraded_reason = "x".into();
+        let text = canonical_receipt(&r);
+        let parts: Vec<&str> = text.split('|').collect();
+        assert_eq!(parts.len(), 28);
+        assert_eq!(parts[20], "78");
+        assert_eq!(
+            parts[21..27],
+            [
+                "100000",
+                "200000",
+                "536870912",
+                "1073741824",
+                r.kernel.as_str(),
+                "313064653a31616430/313064653a32323034"
+            ]
+        );
+        assert_eq!(
+            parts[27],
+            blake2b_256_hex(canonical_scheme(&receipt_scheme()).as_bytes())
+        );
+    }
+
+    #[test]
+    fn devices_must_be_sorted_without_repeats_or_empty_chips() {
+        for devices in [vec!["b", "a"], vec!["a", "a"], vec!["", "a"]] {
+            let mut r = reserved_start();
+            r.devices = devices.iter().map(|d| d.to_string()).collect();
+            let r = signed_with_seed(r);
+            assert!(!verify(&r, None, None), "{devices:?}");
+            assert!(problems(&r, None, None)
+                .iter()
+                .any(|p| p.starts_with("devices ")));
+        }
+    }
+
+    #[test]
+    fn the_kernel_is_a_digest_or_empty() {
+        let mut r = reserved_start();
+        r.kernel = "not-hex".into();
+        let r = signed_with_seed(r);
+        assert!(problems(&r, None, None).contains(&"kernel is not a 64-hex digest".to_string()));
+        let mut r = reserved_start();
+        r.kernel.clear();
+        assert!(verify(&signed_with_seed(r), None, None));
+    }
+
+    #[test]
+    fn a_checkpoint_or_close_has_no_start_fields() {
+        let all = load();
+        for name in ["checkpoint", "close"] {
+            type Change = fn(&mut ExecutionReceipt);
+            let changes: [(&str, Change); 6] = [
+                ("cpu_period", |r| r.cpu_period = 1),
+                ("cpu_quota", |r| r.cpu_quota = 1),
+                ("mem_limit", |r| r.mem_limit = 1),
+                ("disk_space", |r| r.disk_space = 1),
+                ("kernel", |r| r.kernel = "ab".repeat(32)),
+                ("devices", |r| r.devices = vec!["10de:2204".into()]),
+            ];
+            for (field, change) in changes {
+                let mut r = receipt(&all[name]);
+                change(&mut r);
+                let r = signed_with_seed(r);
+                assert!(
+                    problems(&r, None, None)
+                        .iter()
+                        .any(|p| p.starts_with("a checkpoint has no start fields")
+                            && p.contains(field)),
+                    "{name} {field}"
+                );
+            }
+        }
     }
 }
