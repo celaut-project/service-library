@@ -26,6 +26,29 @@ pub struct BytesKeyValue {
     #[prost(bytes = "vec", optional, tag = "2")]
     pub value: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+/// A setting of a service. It has the same form as each replaceable component
+/// (tags, prose, formal), plus the value. A setting is the decision of an author that a
+/// node enforces. Nodes compare a setting by the exact bytes of its formal, and never by
+/// its tags or its prose. A node that does not know the formal, or does not understand
+/// the value, does not run the service. In one list, two policies do not have the same
+/// formal, and a sender sorts the list by formal (bytes, ascending). The order does not
+/// change the meaning. A policy with an empty formal is not valid.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Policy {
+    /// Names, for a reader. A node does not use them to identify the setting.
+    #[prost(string, repeated, tag = "1")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The text, for an implementer. A node does not use it to identify the setting.
+    #[prost(string, tag = "2")]
+    pub prose: ::prost::alloc::string::String,
+    /// The definition of the setting. It is what nodes compare. It is not empty. A
+    /// published formal never changes: a new meaning is a new formal.
+    #[prost(bytes = "vec", tag = "3")]
+    pub formal: ::prost::alloc::vec::Vec<u8>,
+    /// The setting in this message. Its form is defined by the formal.
+    #[prost(bytes = "vec", tag = "4")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
 /// One entry of a list of key-value entries, with an Amount value. The list follows the
 /// same rules as a list of BytesKeyValue.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -61,7 +84,8 @@ pub struct Uint64KeyValue {
     pub value: ::core::option::Option<u64>,
 }
 /// A payment contract or a reputation proof on a ledger. The ledger gives the chain and
-/// its rules. The xattrs give all the values that are specific to the ledger.
+/// its rules. The protocol gives the kind of payment contract on that ledger. The xattrs
+/// give the values of this contract.
 ///
 /// Keys of xattrs:
 /// "script": the script bytes that receive the payment (on Ergo, the propositionBytes;
@@ -71,8 +95,6 @@ pub struct Uint64KeyValue {
 /// not set it now. A reader uses it only if there is no script.
 /// "token_id": the asset: the name of the native asset (for example "ERG" or "BTC"), or
 /// the id of the token. On a reputation proof, the token id of the proof.
-/// "contract_type": an identifier of the kind of payment contract, as UTF-8 text. It
-/// does not depend on the wallet. A reputation proof does not have it.
 /// "owner_public_key" and "owner_signature": on a reputation proof only, the owner
 /// attestation. The public key is the key that published the proof, in the encoding
 /// that the ledger declaration gives. The signature is by that key, on a text that
@@ -80,13 +102,20 @@ pub struct Uint64KeyValue {
 /// the text. The attestation proves only that the owner of the key accepts this peer as
 /// the holder of the proof. If the attestation is missing or does not verify, the
 /// reader does not credit the proof to the peer.
+///
+/// The formal field of the protocol of a payment contract defines the keys of xattrs of
+/// that contract: what they mean, how they are encoded and which of them are required.
+/// A reputation proof has no protocol. Its ledger declaration defines its keys.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Contract {
     /// The ledger of the contract.
     #[prost(message, optional, tag = "1")]
     pub ledger: ::core::option::Option<contract::Ledger>,
+    /// The payment protocol of the contract.
+    #[prost(message, optional, tag = "2")]
+    pub protocol: ::core::option::Option<contract::Protocol>,
     /// The values that are specific to the ledger. See the keys above.
-    #[prost(message, repeated, tag = "2")]
+    #[prost(message, repeated, tag = "3")]
     pub xattrs: ::prost::alloc::vec::Vec<BytesKeyValue>,
 }
 /// Nested message and enum types in `Contract`.
@@ -103,6 +132,27 @@ pub mod contract {
         #[prost(string, tag = "2")]
         pub prose: ::prost::alloc::string::String,
         /// The network, the units and the rules of the ledger, as sorted key=value lines.
+        #[prost(bytes = "vec", tag = "3")]
+        pub formal: ::prost::alloc::vec::Vec<u8>,
+    }
+    /// The kind of payment contract on the ledger, with the same three parts as
+    /// DataFormat. A ledger can have more than one kind of contract. The formal field
+    /// defines the keys of xattrs and the way to pay. Nodes compare it byte for byte,
+    /// and never the tags or the prose. A node that does not know the formal cannot pay
+    /// to the contract, and it does not use the contract. A payment contract has a
+    /// protocol with a formal that is not empty. A reputation proof does not have one.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct Protocol {
+        /// Names of the kind of contract, for a reader. A node does not use them to
+        /// identify it.
+        #[prost(string, repeated, tag = "1")]
+        pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+        /// A text that explains the kind of contract to an implementer. A node does not
+        /// use it to identify it.
+        #[prost(string, tag = "2")]
+        pub prose: ::prost::alloc::string::String,
+        /// The definition of the kind of contract. It is what nodes compare. A formal
+        /// that was published never changes: a new meaning is a new formal.
         #[prost(bytes = "vec", tag = "3")]
         pub formal: ::prost::alloc::vec::Vec<u8>,
     }
@@ -264,6 +314,13 @@ pub mod service {
             /// Only for information: the node does not charge it.
             #[prost(message, repeated, tag = "4")]
             pub mu_per_call: ::prost::alloc::vec::Vec<super::super::AmountKeyValue>,
+            /// The settings of the slot: how a third party reaches it, and if a tunnel
+            /// connection wakes a hibernated instance. A node that does not know a
+            /// setting, or does not understand its value, does not run the service. See
+            /// Policy and docs/policies/. Nodes older than this field ignore it. In
+            /// ConfigurationFile.gateway the node ignores these settings.
+            #[prost(message, repeated, tag = "5")]
+            pub policies: ::prost::alloc::vec::Vec<super::super::Policy>,
         }
     }
     /// One group of identical instances that run at the same time.
@@ -380,14 +437,15 @@ pub mod service {
             /// The entries of the directory.
             #[prost(message, repeated, tag = "1")]
             pub branch: ::prost::alloc::vec::Vec<filesystem::ItemBranch>,
-            /// Attributes of the whole tree. Only on the root Filesystem: a reader
-            /// ignores them on a subdirectory. Key "read_mode": "rw" (the default) or
-            /// "ro". Another value is an error. With "ro", the service can write only in
-            /// /tmp and /run. Every entry must then have all the metadata keys, and no
-            /// directory can have "shared". The node can then make a compressed image
-            /// and mount it read-only.
+            /// Settings of the whole tree. Only on the root Filesystem (the one that
+            /// Container.filesystem holds): a subdirectory has none. The setting
+            /// "read_mode" is valid here: "rw" (the default) or "ro". With "ro", the
+            /// service can write only in /tmp and /run. Every entry must then have all
+            /// the metadata keys. The node can then make a compressed image and mount it
+            /// read-only. A node that does not know a policy does not run the service.
+            /// See Policy.
             #[prost(message, repeated, tag = "2")]
-            pub xattrs: ::prost::alloc::vec::Vec<super::super::BytesKeyValue>,
+            pub policies: ::prost::alloc::vec::Vec<super::super::Policy>,
         }
         /// Nested message and enum types in `Filesystem`.
         pub mod filesystem {
@@ -397,20 +455,18 @@ pub mod service {
                 /// The name of the file, the link or the directory.
                 #[prost(string, tag = "1")]
                 pub name: ::prost::alloc::string::String,
-                /// Attributes of the entry. Every entry has all or none of these keys:
-                /// "mode", "uid", "gid", "mtime_ns", "device.major", "device.minor",
-                /// "device.is_block". Their values are base-10 integers as UTF-8 text. On
-                /// an entry that is not a device, the three device keys are "0". Keys for
-                /// a shared directory:
-                /// "shared": "true" exports the directory to the child services.
-                /// "guest": "true" gets the directory from the parent service. A service
-                /// with "guest" does not start if its parent does not export that share.
-                /// "access": "ro" or "rw". The default is "rw".
-                /// "share_tag": the name of the share. The default is the path.
-                /// "share_env": the name of an environment variable. Its value selects
-                /// the share.
+                /// Attributes of the entry, as in a tar archive. Every entry has all or
+                /// none of these keys: "mode", "uid", "gid", "mtime_ns", "device.major",
+                /// "device.minor", "device.is_block". Their values are base-10 integers as
+                /// UTF-8 text. On an entry that is not a device, the three device keys are
+                /// "0". A node reads no setting from here and ignores other keys.
                 #[prost(message, repeated, tag = "5")]
                 pub xattrs: ::prost::alloc::vec::Vec<super::super::super::BytesKeyValue>,
+                /// Settings of the entry. Only these places are valid: the setting
+                /// "share" on a directory. A node that does not know a policy does not
+                /// run the service. See Policy.
+                #[prost(message, repeated, tag = "6")]
+                pub policies: ::prost::alloc::vec::Vec<super::super::super::Policy>,
                 #[prost(oneof = "item_branch::Item", tags = "2, 3, 4")]
                 pub item: ::core::option::Option<item_branch::Item>,
             }
@@ -449,10 +505,11 @@ pub mod service {
             /// The path of the executable, as path segments. No arguments.
             #[prost(string, repeated, tag = "1")]
             pub entry_path: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-            /// Other start options of the service, as keys and values. The node does not
-            /// read them now.
+            /// Settings of the start. No setting is defined here now, so a node
+            /// refuses a service that has one. The list exists now so that a setting
+            /// defined later is safe on nodes that are old. See Policy.
             #[prost(message, repeated, tag = "2")]
-            pub xattrs: ::prost::alloc::vec::Vec<super::super::BytesKeyValue>,
+            pub policies: ::prost::alloc::vec::Vec<super::super::Policy>,
         }
         /// Where the service reads its configuration.
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1328,6 +1385,91 @@ pub struct ExecutionReceipt {
     /// peer.
     #[prost(string, repeated, tag = "30")]
     pub devices: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Signed messages of one node that show a fault of that node. A receiver checks them
+/// with the public key of that node only, and does not trust the node that sends them.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FaultEvidence {
+    /// The reason of the fault, as the reasons of the reputation events: for example
+    /// "killed_with_mu" or "maintenance_overcharged".
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+    /// The peer_id of the node that the evidence accuses: its public key, in lowercase
+    /// hexadecimal. That node signed each statement and each receipt.
+    #[prost(string, tag = "2")]
+    pub accused: ::prost::alloc::string::String,
+    /// Pages of balance statements of the accused node, in the order of their seqs. The
+    /// celaut-gateway layer gives which pages each reason needs.
+    #[prost(message, repeated, tag = "3")]
+    pub statements: ::prost::alloc::vec::Vec<BalanceStatement>,
+    /// Execution receipts of the accused node, for "statement_contradicts_receipt".
+    #[prost(message, repeated, tag = "4")]
+    pub receipts: ::prost::alloc::vec::Vec<ExecutionReceipt>,
+}
+/// One opinion of a ReputationProof. It has the same parts as an opinion box of a
+/// reputation proof on a ledger.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReputationOpinion {
+    /// What kind of object the opinion is about, as R4 on the ledger. A node is the
+    /// CELAUT_NODE_TYPE_NFT_ID that the celaut-gateway layer gives.
+    #[prost(string, tag = "1")]
+    pub r#type: ::prost::alloc::string::String,
+    /// The object of the opinion, as R5 on the ledger. For a node, its peer_id.
+    #[prost(string, tag = "2")]
+    pub object: ::prost::alloc::string::String,
+    /// How much of its opinion the publisher puts on the object, on the scale of the
+    /// reputation of the publisher. A fault report has 0: the score of the same object
+    /// already counts the fault.
+    #[prost(uint64, tag = "3")]
+    pub amount: u64,
+    /// True for an opinion for the object, false for an opinion against it, as R8 on
+    /// the ledger.
+    #[prost(bool, tag = "4")]
+    pub positive: bool,
+    /// Free content, as R9 on the ledger. For a fault report, UTF-8 JSON with the key
+    /// "reason".
+    #[prost(bytes = "vec", tag = "5")]
+    pub content: ::prost::alloc::vec::Vec<u8>,
+    /// Only in a fault report: the signed messages that prove the fault. Absent when
+    /// the fault rests on what only the publisher knows.
+    #[prost(message, optional, tag = "6")]
+    pub evidence: ::core::option::Option<FaultEvidence>,
+}
+/// The opinions of a node about other nodes, signed with its identity key. It is the
+/// off-chain form of a reputation proof on a ledger. A receiver keeps only the newest
+/// proof of each publisher.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReputationProof {
+    /// The peer_id of the node that signs: its public key, in lowercase hexadecimal. It
+    /// is the id of the proof.
+    #[prost(string, tag = "1")]
+    pub publisher: ::prost::alloc::string::String,
+    /// When the publisher signed, in unix seconds. A receiver refuses a proof that is
+    /// not newer than the last proof that it accepted from the same publisher.
+    #[prost(int64, tag = "2")]
+    pub ts: i64,
+    /// The opinions. The signature covers them in this order.
+    #[prost(message, repeated, tag = "3")]
+    pub opinions: ::prost::alloc::vec::Vec<ReputationOpinion>,
+    /// The scheme of the signature, as on the Peer, without the prose.
+    #[prost(message, optional, tag = "4")]
+    pub signature_scheme: ::core::option::Option<peer::SignatureScheme>,
+    /// The signature, in lowercase hexadecimal. The celaut-gateway layer gives the text
+    /// that the node signs.
+    #[prost(string, tag = "5")]
+    pub signature: ::prost::alloc::string::String,
+}
+/// The answer of PushReputationProof.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReputationProofAck {
+    /// True if the node checked the proof and took it: it keeps the proof when the
+    /// publisher is a peer of the node, and it scores the faults that the evidence in it
+    /// proves. False if it refused the proof.
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+    /// Why the node refused the proof. Empty if accepted is true.
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
 }
 /// The answer of StartService.
 #[derive(Clone, PartialEq, ::prost::Message)]

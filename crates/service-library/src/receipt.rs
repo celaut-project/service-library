@@ -1458,6 +1458,50 @@ mod tests {
     }
 
     #[test]
+    fn a_start_receipt_of_a_service_with_a_policy_in_init_verifies() {
+        use celaut_proto::celaut::service::container::Init;
+        use celaut_proto::celaut::service::Container;
+        use celaut_proto::celaut::{Policy, Service};
+        use celaut_proto::Message;
+        let service = Service {
+            container: Some(Container {
+                init: Some(Init {
+                    entry_path: vec!["run".into()],
+                    policies: vec![Policy {
+                        tags: vec!["demo".into()],
+                        prose: "A setting for the test.".into(),
+                        formal: b"demo.setting".to_vec(),
+                        value: b"1".to_vec(),
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bytes = service.encode_to_vec();
+        assert_eq!(Service::decode(bytes.as_slice()).unwrap(), service);
+        let id: [u8; 32] = bee_rpc::hash::HashAlgorithm::Sha3_256
+            .digest(&bytes)
+            .try_into()
+            .unwrap();
+        let mut r = start();
+        r.service_id = Some(Hash {
+            r#type: SHA3_256_TYPE.to_vec(),
+            value: id.to_vec(),
+        });
+        let r = signed(r);
+        let faults = check_start(
+            &r,
+            Some(PEER_ID),
+            TOKEN,
+            &id,
+            &sent_envs(),
+            Some(INITIAL_MU),
+        );
+        assert_eq!(faults, vec![]);
+    }
+
+    #[test]
     fn a_start_receipt_for_another_service_or_variables_or_amount_is_a_fault() {
         let faults = check_start(
             &start(),

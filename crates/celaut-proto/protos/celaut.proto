@@ -58,6 +58,25 @@ message BytesKeyValue {
     optional bytes value = 2;
 }
 
+// A setting of a service. It has the same form as each replaceable component
+// (tags, prose, formal), plus the value. A setting is the decision of an author that a
+// node enforces. Nodes compare a setting by the exact bytes of its formal, and never by
+// its tags or its prose. A node that does not know the formal, or does not understand
+// the value, does not run the service. In one list, two policies do not have the same
+// formal, and a sender sorts the list by formal (bytes, ascending). The order does not
+// change the meaning. A policy with an empty formal is not valid.
+message Policy {
+    // Names, for a reader. A node does not use them to identify the setting.
+    repeated string tags = 1;
+    // The text, for an implementer. A node does not use it to identify the setting.
+    string prose = 2;
+    // The definition of the setting. It is what nodes compare. It is not empty. A
+    // published formal never changes: a new meaning is a new formal.
+    bytes formal = 3;
+    // The setting in this message. Its form is defined by the formal.
+    bytes value = 4;
+}
+
 // One entry of a list of key-value entries, with an Amount value. The list follows the
 // same rules as a list of BytesKeyValue.
 message AmountKeyValue {
@@ -106,7 +125,8 @@ message Uint64KeyValue {
 // ledger published by different wallets. (src/utils/contract_xattrs.py has the keys.)
 
 // A payment contract or a reputation proof on a ledger. The ledger gives the chain and
-// its rules. The xattrs give all the values that are specific to the ledger.
+// its rules. The protocol gives the kind of payment contract on that ledger. The xattrs
+// give the values of this contract.
 //
 // Keys of xattrs:
 // "script": the script bytes that receive the payment (on Ergo, the propositionBytes;
@@ -116,8 +136,6 @@ message Uint64KeyValue {
 // not set it now. A reader uses it only if there is no script.
 // "token_id": the asset: the name of the native asset (for example "ERG" or "BTC"), or
 // the id of the token. On a reputation proof, the token id of the proof.
-// "contract_type": an identifier of the kind of payment contract, as UTF-8 text. It
-// does not depend on the wallet. A reputation proof does not have it.
 // "owner_public_key" and "owner_signature": on a reputation proof only, the owner
 // attestation. The public key is the key that published the proof, in the encoding
 // that the ledger declaration gives. The signature is by that key, on a text that
@@ -125,6 +143,10 @@ message Uint64KeyValue {
 // the text. The attestation proves only that the owner of the key accepts this peer as
 // the holder of the proof. If the attestation is missing or does not verify, the
 // reader does not credit the proof to the peer.
+//
+// The formal field of the protocol of a payment contract defines the keys of xattrs of
+// that contract: what they mean, how they are encoded and which of them are required.
+// A reputation proof has no protocol. Its ledger declaration defines its keys.
 message Contract {
     // A description of a ledger, with the same three parts as DataFormat. The tags name
     // the ledger. The prose explains it. The formal field gives the network, the units
@@ -139,8 +161,27 @@ message Contract {
     }
     // The ledger of the contract.
     Ledger ledger = 1;
+    // The kind of payment contract on the ledger, with the same three parts as
+    // DataFormat. A ledger can have more than one kind of contract. The formal field
+    // defines the keys of xattrs and the way to pay. Nodes compare it byte for byte,
+    // and never the tags or the prose. A node that does not know the formal cannot pay
+    // to the contract, and it does not use the contract. A payment contract has a
+    // protocol with a formal that is not empty. A reputation proof does not have one.
+    message Protocol {
+        // Names of the kind of contract, for a reader. A node does not use them to
+        // identify it.
+        repeated string tags = 1;
+        // A text that explains the kind of contract to an implementer. A node does not
+        // use it to identify it.
+        string prose = 2;
+        // The definition of the kind of contract. It is what nodes compare. A formal
+        // that was published never changes: a new meaning is a new formal.
+        bytes formal = 3;
+    }
+    // The payment protocol of the contract.
+    Protocol protocol = 2;
     // The values that are specific to the ledger. See the keys above.
-    repeated BytesKeyValue xattrs = 2;
+    repeated BytesKeyValue xattrs = 3;
 }
 
 // Why a string and not an integer: a balance has no limit. Ergo defaults to 1 MU = 1
@@ -244,6 +285,12 @@ message Service {
             // ConfigurationFile.gateway, the keys are the names of the rates of the node.
             // Only for information: the node does not charge it.
             repeated AmountKeyValue mu_per_call = 4;
+            // The settings of the slot: how a third party reaches it, and if a tunnel
+            // connection wakes a hibernated instance. A node that does not know a
+            // setting, or does not understand its value, does not run the service. See
+            // Policy and docs/policies/. Nodes older than this field ignore it. In
+            // ConfigurationFile.gateway the node ignores these settings.
+            repeated Policy policies = 5;
         }
 
         // The ports of the service.
@@ -338,38 +385,37 @@ message Service {
                     // The content of a directory.
                     Filesystem filesystem = 4;
                 }
-                // Attributes of the entry. Every entry has all or none of these keys:
-                // "mode", "uid", "gid", "mtime_ns", "device.major", "device.minor",
-                // "device.is_block". Their values are base-10 integers as UTF-8 text. On
-                // an entry that is not a device, the three device keys are "0". Keys for
-                // a shared directory:
-                // "shared": "true" exports the directory to the child services.
-                // "guest": "true" gets the directory from the parent service. A service
-                // with "guest" does not start if its parent does not export that share.
-                // "access": "ro" or "rw". The default is "rw".
-                // "share_tag": the name of the share. The default is the path.
-                // "share_env": the name of an environment variable. Its value selects
-                // the share.
+                // Attributes of the entry, as in a tar archive. Every entry has all or
+                // none of these keys: "mode", "uid", "gid", "mtime_ns", "device.major",
+                // "device.minor", "device.is_block". Their values are base-10 integers as
+                // UTF-8 text. On an entry that is not a device, the three device keys are
+                // "0". A node reads no setting from here and ignores other keys.
                 repeated BytesKeyValue xattrs = 5;
+                // Settings of the entry. Only these places are valid: the setting
+                // "share" on a directory. A node that does not know a policy does not
+                // run the service. See Policy.
+                repeated Policy policies = 6;
             }
             // The entries of the directory.
             repeated ItemBranch branch = 1;
-            // Attributes of the whole tree. Only on the root Filesystem: a reader
-            // ignores them on a subdirectory. Key "read_mode": "rw" (the default) or
-            // "ro". Another value is an error. With "ro", the service can write only in
-            // /tmp and /run. Every entry must then have all the metadata keys, and no
-            // directory can have "shared". The node can then make a compressed image
-            // and mount it read-only.
-            repeated BytesKeyValue xattrs = 2;
+            // Settings of the whole tree. Only on the root Filesystem (the one that
+            // Container.filesystem holds): a subdirectory has none. The setting
+            // "read_mode" is valid here: "rw" (the default) or "ro". With "ro", the
+            // service can write only in /tmp and /run. Every entry must then have all
+            // the metadata keys. The node can then make a compressed image and mount it
+            // read-only. A node that does not know a policy does not run the service.
+            // See Policy.
+            repeated Policy policies = 2;
         }
 
         // How the node starts the service.
         message Init {
             // The path of the executable, as path segments. No arguments.
             repeated string entry_path = 1;
-            // Other start options of the service, as keys and values. The node does not
-            // read them now.
-            repeated BytesKeyValue xattrs = 2;
+            // Settings of the start. No setting is defined here now, so a node
+            // refuses a service that has one. The list exists now so that a setting
+            // defined later is safe on nodes that are old. See Policy.
+            repeated Policy policies = 2;
         }
 
         // Where the service reads its configuration.
@@ -442,8 +488,8 @@ message Service {
     }
 
     // Shared disks / VirtioFS / filesystem inheritance are NOT networks. Those are an
-    // execution-environment concern expressed through Container.Filesystem.ItemBranch.xattrs
-    // (shared, guest, access, share_tag, share_env).
+    // execution-environment concern expressed through the policies of Container.Filesystem
+    // (the setting "share").
 
     // A logical domain where the instances of the service find their peers. It gives
     // which peers the service wants (tags, prose, formal) and which protocols these
@@ -1159,6 +1205,74 @@ message ExecutionReceipt {
     repeated string devices = 30;
 }
 
+// Signed messages of one node that show a fault of that node. A receiver checks them
+// with the public key of that node only, and does not trust the node that sends them.
+message FaultEvidence {
+    // The reason of the fault, as the reasons of the reputation events: for example
+    // "killed_with_mu" or "maintenance_overcharged".
+    string reason = 1;
+    // The peer_id of the node that the evidence accuses: its public key, in lowercase
+    // hexadecimal. That node signed each statement and each receipt.
+    string accused = 2;
+    // Pages of balance statements of the accused node, in the order of their seqs. The
+    // celaut-gateway layer gives which pages each reason needs.
+    repeated BalanceStatement statements = 3;
+    // Execution receipts of the accused node, for "statement_contradicts_receipt".
+    repeated ExecutionReceipt receipts = 4;
+}
+
+// One opinion of a ReputationProof. It has the same parts as an opinion box of a
+// reputation proof on a ledger.
+message ReputationOpinion {
+    // What kind of object the opinion is about, as R4 on the ledger. A node is the
+    // CELAUT_NODE_TYPE_NFT_ID that the celaut-gateway layer gives.
+    string type = 1;
+    // The object of the opinion, as R5 on the ledger. For a node, its peer_id.
+    string object = 2;
+    // How much of its opinion the publisher puts on the object, on the scale of the
+    // reputation of the publisher. A fault report has 0: the score of the same object
+    // already counts the fault.
+    uint64 amount = 3;
+    // True for an opinion for the object, false for an opinion against it, as R8 on
+    // the ledger.
+    bool positive = 4;
+    // Free content, as R9 on the ledger. For a fault report, UTF-8 JSON with the key
+    // "reason".
+    bytes content = 5;
+    // Only in a fault report: the signed messages that prove the fault. Absent when
+    // the fault rests on what only the publisher knows.
+    FaultEvidence evidence = 6;
+}
+
+// The opinions of a node about other nodes, signed with its identity key. It is the
+// off-chain form of a reputation proof on a ledger. A receiver keeps only the newest
+// proof of each publisher.
+message ReputationProof {
+    // The peer_id of the node that signs: its public key, in lowercase hexadecimal. It
+    // is the id of the proof.
+    string publisher = 1;
+    // When the publisher signed, in unix seconds. A receiver refuses a proof that is
+    // not newer than the last proof that it accepted from the same publisher.
+    int64 ts = 2;
+    // The opinions. The signature covers them in this order.
+    repeated ReputationOpinion opinions = 3;
+    // The scheme of the signature, as on the Peer, without the prose.
+    Peer.SignatureScheme signature_scheme = 4;
+    // The signature, in lowercase hexadecimal. The celaut-gateway layer gives the text
+    // that the node signs.
+    string signature = 5;
+}
+
+// The answer of PushReputationProof.
+message ReputationProofAck {
+    // True if the node checked the proof and took it: it keeps the proof when the
+    // publisher is a peer of the node, and it scores the faults that the evidence in it
+    // proves. False if it refused the proof.
+    bool accepted = 1;
+    // Why the node refused the proof. Empty if accepted is true.
+    string reason = 2;
+}
+
 // The answer of StartService.
 message ServiceInstance {
     // The instance token. It is the credential for StopService, ModifyDeposit,
@@ -1732,6 +1846,19 @@ service Gateway {
     // with a non-global address or a DNS name, and the number of Peers has a limit. If
     // the node does not share its known peers, the stream is empty.
     rpc ListPeers(stream buffer.Buffer) returns (stream buffer.Buffer) {}
+    // Returns a stream of ReputationProof: first the proof of the node, then proofs of
+    // other nodes that the node holds. The node sends each proof as its publisher
+    // signed it, never changed. The number of proofs has a limit. If the node does not
+    // share reputation proofs, the stream is empty.
+    rpc GetReputationProofs(stream buffer.Buffer) returns (stream buffer.Buffer) {}
+    // Gives the node one ReputationProof, in place of the node taking it with
+    // GetReputationProofs. The proof is the proof of its publisher, signed as for
+    // GetReputationProofs, and the node checks it in the same way. The node can refuse
+    // the call before it reads the proof: it can accept the call only from a peer, and
+    // it limits the calls and the bytes of each client and of all clients together. The
+    // answer is a ReputationProofAck. A node that does not accept pushed proofs refuses
+    // every call.
+    rpc PushReputationProof(stream buffer.Buffer) returns (stream buffer.Buffer) {}
 
     // Any Service.Network, not one kind of it. If the caller must know the kind first,
     // the caller does the resolution itself. A `pow:` network has no name to look up,
@@ -1825,7 +1952,13 @@ service Gateway {
     // the node has no traffic allowance left, UNAVAILABLE when the descendant does not
     // answer or is not alive, and INVALID_ARGUMENT for a request that is not correct.
     // When a node below refuses after the stream started, the stream stops with no
-    // more bytes.
+    // more bytes. A caller that has no token can send an Instance.Uri at index 3 in place
+    // of the TokenMessage: the address that the node published for a slot. The node opens
+    // the stream only if the slot declares the setting tunnel_auth=address (see Policy and
+    // docs/policies/). If the slot declares wake=on_tunnel, the node wakes a hibernated
+    // instance and waits for it. In this mode there are no receipts, and every failure is
+    // UNAVAILABLE, with one text: the caller does not learn if the address is unknown, if
+    // the slot is closed to this way, or if the instance is asleep.
     rpc ServiceTunnel(stream buffer.Buffer) returns (stream buffer.Buffer) {}
     // Takes an ObserveRequest and returns a stream of ObserveEvent. If the observation
     // starts, the first event is a session event. If not, the stream has only one
