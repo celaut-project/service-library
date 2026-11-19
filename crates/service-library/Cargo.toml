@@ -24,7 +24,7 @@ tonic = { version = "0.14", default-features = false, features = ["transport"] }
 tonic-prost = { version = "0.14", default-features = false }
 
 [features]
-# `https://` for the skills registry (the public Explorer is https only). Off, the library
+# `https://` for the Celaut Registry (the public Explorer is https only). Off, the library
 # speaks plain HTTP only and the static `celaut` binary stays smaller.
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
 

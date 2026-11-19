@@ -881,3 +881,49 @@ async fn account_needs_a_budget_and_never_reads_beyond_it() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Run `celaut objectives` with the type id variables removed: the exit code, stdout, stderr.
+async fn objectives(args: &[&str]) -> (i32, String, String) {
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_celaut"))
+        .env_remove("CELAUT_OBJECTIVE_TYPE_ID")
+        .env_remove("CELAUT_BENCHMARK_TYPE_ID")
+        .env_remove("CELAUT_COVERAGE_TYPE_ID")
+        .env_remove("CELAUT_RESULT_TYPE_ID")
+        // Nothing listens here: a command that reached the network would fail.
+        .args(["objectives", "--explorer", "127.0.0.1:1"])
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn objectives_without_a_type_id_is_empty_and_gives_a_hint() {
+    let (code, stdout, stderr) = objectives(&[]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "[]");
+    assert!(stderr.contains("CELAUT_OBJECTIVE_TYPE_ID"), "{stderr}");
+    assert!(stderr.contains("--objective-type-id"), "{stderr}");
+    assert_eq!(stderr.trim().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn a_type_id_that_is_not_64_hex_characters_is_refused() {
+    for bad in ["abc", &"zz".repeat(32), &"ab".repeat(33)] {
+        let (code, _, stderr) = objectives(&["--objective-type-id", bad]).await;
+        assert_eq!(code, 1, "{stderr}");
+        let error: Value = serde_json::from_str(&stderr).unwrap();
+        assert_eq!(error["kind"], "config", "{stderr}");
+        assert!(
+            error["error"].as_str().unwrap().contains("64 hex"),
+            "{stderr}"
+        );
+    }
+    let (code, _, stderr) = objectives(&["--result-type-id", "nope"]).await;
+    assert_eq!(code, 1, "{stderr}");
+}

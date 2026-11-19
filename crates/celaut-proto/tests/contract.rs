@@ -1,5 +1,6 @@
-//! The wire form of `Contract` after the sync with nodo dev 17e63ca4: the protocol is
-//! field 2 and the xattrs are field 3.
+//! The wire form of `Contract` and `Configuration` after the sync with nodo dev. The protocol
+//! of a contract is field 2 and its xattrs are field 3. The initial_mu of a configuration
+//! is field 2.
 
 use celaut_proto::celaut::contract::Protocol;
 use celaut_proto::celaut::{BytesKeyValue, Contract};
@@ -37,4 +38,20 @@ fn the_xattrs_of_a_contract_are_field_three() {
     };
     // Tag 3, wire type 2: 0x1a. The old field 2 was 0x12.
     assert_eq!(contract.encode_to_vec()[0], 0x1a);
+}
+
+#[test]
+fn the_initial_mu_of_a_configuration_is_field_two() {
+    use celaut_proto::celaut::{Amount, Configuration};
+
+    let configuration = Configuration {
+        environment_variables: Vec::new(),
+        initial_mu: Some(Amount { n: "7".into() }),
+    };
+    let bytes = configuration.encode_to_vec();
+    // Tag 2, wire type 2: 0x12. The old field 3 was 0x1a. The Amount holds the string "7"
+    // as field 1: 0x0a 0x01 0x37.
+    assert_eq!(bytes, [0x12, 0x03, 0x0a, 0x01, 0x37]);
+    let back = Configuration::decode(bytes.as_slice()).unwrap();
+    assert_eq!(back, configuration);
 }

@@ -1,2 +1,2 @@
-celaut-project/nodo 17e63ca42f1f9113a164830d741de549b40ec99a protos/celaut.proto (dev, after the slot policies, the payment protocol and the off-chain reputation)
+celaut-project/nodo 5798cea4df3f415963570d098b3014c290ac4fa2 protos/celaut.proto (dev, after Configuration.spec_slot is removed and initial_mu is field 2)
 celaut-project/nodo aa37eae46d2de02a4a1f5a89874f63023ed4bce5 protos/buffer.proto

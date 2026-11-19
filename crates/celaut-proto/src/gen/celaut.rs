@@ -632,9 +632,6 @@ pub struct Configuration {
     /// uses its value as the name of the instance.
     #[prost(message, repeated, tag = "1")]
     pub environment_variables: ::prost::alloc::vec::Vec<BytesKeyValue>,
-    /// Not used. Senders do not set it, and receivers ignore it.
-    #[prost(int32, repeated, tag = "2")]
-    pub spec_slot: ::prost::alloc::vec::Vec<i32>,
     /// The most that the start can cost the caller, in MU. The node charges all of it to
     /// the caller, and only this: no node charges the build of the service to the account
     /// of the caller. The node takes the cost of the build from this amount. What is left
@@ -645,7 +642,7 @@ pub struct Configuration {
     /// EstimatedCost.cost plus a default balance. The node calculates the default balance
     /// from the resources at the start, for its own default number of maintenance
     /// periods.
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     pub initial_mu: ::core::option::Option<Amount>,
 }
 /// What the node gives to an instance when it starts it. The node writes it, serialized,

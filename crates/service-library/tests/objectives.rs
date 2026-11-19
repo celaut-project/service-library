@@ -1,20 +1,29 @@
-//! The skills registry reader against an in-process Explorer that answers a box search as the
+//! The objectives registry reader against an in-process Explorer that answers a box search as the
 //! real one does.
 
 use serde_json::{json, Value};
-use service_library::skills::{
-    InfoMode, Skills, BENCHMARK_TYPE_ID, COVERAGE_TYPE_ID, RESULT_TYPE_ID, SKILL_TYPE_ID,
+use service_library::objectives::{
+    InfoMode, Objectives, BENCHMARK_TYPE_ID, COVERAGE_TYPE_ID, RESULT_TYPE_ID,
 };
 use service_library::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const SKILL: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
+const OBJECTIVE: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
+/// A synthetic objective type id: the library has no default for it.
+const OBJECTIVE_TYPE: &str = "cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33";
 const BENCH: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
 const GENERAL: &str = "dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44";
 const SVC_A: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 const SVC_C: &str = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 const SVC_B: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+
+fn reader(uri: &str) -> Objectives {
+    Objectives::new(uri)
+        .unwrap()
+        .with_objective_type_id(OBJECTIVE_TYPE)
+        .unwrap()
+}
 
 /// A box of the Explorer: R9 is JSON, rendered as hex.
 fn explorer_box(box_id: &str, r9: Value) -> Value {
@@ -28,34 +37,34 @@ fn explorer_box(box_id: &str, r9: Value) -> Value {
 /// The boxes that the fake Explorer holds, by (R4, R5).
 fn registry(r4: &str, r5: Option<&str>) -> Vec<Value> {
     match (r4, r5) {
-        (t, None) if t == SKILL_TYPE_ID => vec![
+        (t, None) if t == OBJECTIVE_TYPE => vec![
             explorer_box(
-                SKILL,
+                OBJECTIVE,
                 json!({"name": "Sat-sorter", "prose": "sort sats", "tags": ["utxo"],
-                       "extended_skill_boxes": [], "profile_id": "pp"}),
+                       "extended_objective_boxes": [], "profile_id": "pp"}),
             ),
             // It extends the first one, so it inherits its services and benchmarks.
             explorer_box(
                 GENERAL,
-                json!({"name": "General sorter", "extended_skill_boxes": [SKILL]}),
+                json!({"name": "General sorter", "extended_objective_boxes": [OBJECTIVE]}),
             ),
         ],
         (t, Some(GENERAL)) if t == COVERAGE_TYPE_ID => {
             vec![explorer_box("cg", json!({"service_id": SVC_B}))]
         }
-        (t, Some(SKILL)) if t == COVERAGE_TYPE_ID => {
+        (t, Some(OBJECTIVE)) if t == COVERAGE_TYPE_ID => {
             vec![explorer_box("c1", json!({"service_id": SVC_A}))]
         }
-        (t, Some(SKILL)) if t == BENCHMARK_TYPE_ID => vec![explorer_box(
+        (t, Some(OBJECTIVE)) if t == BENCHMARK_TYPE_ID => vec![explorer_box(
             BENCH,
             json!({"name": "12 months",
                    "case_descriptors": [{"name": "case0", "description": "d"}],
                    "performance_metrics": [{"name": "ms", "description": "time", "higher_is_better": false}]}),
         )],
-        // A coverage about a benchmark of the skill, not about the skill.
+        // A coverage about a benchmark of the objective, not about the objective.
         (t, Some(BENCH)) if t == COVERAGE_TYPE_ID => vec![explorer_box(
             "c2",
-            json!({"service_id": SVC_C, "skill_box_id": SKILL, "benchmark_id": BENCH}),
+            json!({"service_id": SVC_C, "objective_box_id": OBJECTIVE, "benchmark_id": BENCH}),
         )],
         (t, Some(BENCH)) if t == RESULT_TYPE_ID => vec![
             explorer_box(
@@ -145,13 +154,13 @@ async fn serve(
 }
 
 #[tokio::test]
-async fn the_skill_tree_is_what_the_registry_holds() {
+async fn the_objective_tree_is_what_the_registry_holds() {
     let (uri, mut seen) = serve(false, None).await;
-    let skills = Skills::new(&uri).unwrap();
+    let objectives = reader(&uri);
 
-    let list = skills.load_skills().await.unwrap();
+    let list = objectives.load_objectives().await.unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0].box_id, SKILL);
+    assert_eq!(list[0].box_id, OBJECTIVE);
     assert_eq!(list[0].name, "Sat-sorter");
     assert_eq!(list[0].profile_id, "pp");
     assert_eq!(list[0].tags, ["utxo"]);
@@ -162,19 +171,19 @@ async fn the_skill_tree_is_what_the_registry_holds() {
         path,
         "POST /explorer/api/v1/boxes/unspent/search?offset=0&limit=100 HTTP/1.1"
     );
-    assert_eq!(request["registers"]["R4"], SKILL_TYPE_ID);
+    assert_eq!(request["registers"]["R4"], OBJECTIVE_TYPE);
     assert!(request["registers"].get("R5").is_none());
     assert_eq!(request["ergoTreeTemplateHash"].as_str().unwrap().len(), 64);
 
-    let tree = skills.load_skill_tree(SKILL).await.unwrap();
-    assert_eq!(tree.skill.unwrap().name, "Sat-sorter");
+    let tree = objectives.load_objective_tree(OBJECTIVE).await.unwrap();
+    assert_eq!(tree.objective.unwrap().name, "Sat-sorter");
     // SVC_A is covered directly and by a result: once. SVC_B only by a result.
     let services: Vec<_> = tree
         .coverages
         .iter()
         .map(|c| c.service_id.clone().unwrap())
         .collect();
-    // The service that runs the benchmark (SVC_C) does not solve the skill: it is not here.
+    // The service that runs the benchmark (SVC_C) does not solve the objective: it is not here.
     assert_eq!(services, [SVC_A, SVC_B]);
     assert_eq!(tree.coverages[0].box_id, "c1");
     assert_eq!(tree.coverages[1].box_id, "r2");
@@ -196,20 +205,20 @@ async fn the_skill_tree_is_what_the_registry_holds() {
 }
 
 #[tokio::test]
-async fn a_skill_inherits_what_the_skills_it_extends_have() {
+async fn a_objective_inherits_what_the_objectives_it_extends_have() {
     let (uri, _seen) = serve(false, None).await;
-    let skills = Skills::new(&uri).unwrap();
+    let objectives = reader(&uri);
 
-    let tree = skills.load_skill_tree(GENERAL).await.unwrap();
+    let tree = objectives.load_objective_tree(GENERAL).await.unwrap();
     assert_eq!(
         tree.extends
             .iter()
             .map(|s| s.box_id.as_str())
             .collect::<Vec<_>>(),
-        [SKILL]
+        [OBJECTIVE]
     );
     assert!(tree.extended_by.is_empty());
-    // Its own first (SVC_B), then those of the extended skill (SVC_A; SVC_B is not twice).
+    // Its own first (SVC_B), then those of the extended objective (SVC_A; SVC_B is not twice).
     let services: Vec<_> = tree
         .coverages
         .iter()
@@ -219,15 +228,18 @@ async fn a_skill_inherits_what_the_skills_it_extends_have() {
         services,
         [
             (SVC_B.to_string(), None),
-            (SVC_A.to_string(), Some(SKILL.to_string()))
+            (SVC_A.to_string(), Some(OBJECTIVE.to_string()))
         ]
     );
     assert_eq!(tree.benchmarks.len(), 1);
-    assert_eq!(tree.benchmarks[0].inherited_from.as_deref(), Some(SKILL));
+    assert_eq!(
+        tree.benchmarks[0].inherited_from.as_deref(),
+        Some(OBJECTIVE)
+    );
     assert_eq!(tree.benchmarks[0].results.len(), 2);
 
-    // The extended skill gets nothing from the one that extends it, and knows it.
-    let base = skills.load_skill_tree(SKILL).await.unwrap();
+    // The extended objective gets nothing from the one that extends it, and knows it.
+    let base = objectives.load_objective_tree(OBJECTIVE).await.unwrap();
     assert!(base.coverages.iter().all(|c| c.inherited_from.is_none()));
     assert_eq!(
         base.extended_by
@@ -238,17 +250,20 @@ async fn a_skill_inherits_what_the_skills_it_extends_have() {
     );
 
     // Without inheritance, only its own.
-    let own = skills.load_skill_tree_with(GENERAL, false).await.unwrap();
+    let own = objectives
+        .load_objective_tree_with(GENERAL, false)
+        .await
+        .unwrap();
     assert_eq!(own.coverages.len(), 1);
     assert!(own.benchmarks.is_empty() && own.extends.is_empty());
 
-    let covering = skills
+    let covering = objectives
         .load_coverages_inherited(GENERAL, true)
         .await
         .unwrap();
     assert_eq!(covering.len(), 2);
     assert_eq!(
-        skills
+        objectives
             .load_coverages_inherited(GENERAL, false)
             .await
             .unwrap()
@@ -260,25 +275,29 @@ async fn a_skill_inherits_what_the_skills_it_extends_have() {
 #[tokio::test]
 async fn a_chunked_answer_is_read() {
     let (uri, _seen) = serve(true, None).await;
-    let list = Skills::new(&uri).unwrap().load_skills().await.unwrap();
+    let list = reader(&uri).load_objectives().await.unwrap();
     assert_eq!(list[0].name, "Sat-sorter");
 }
 
 #[tokio::test]
 async fn ids_that_are_not_hex_find_nothing_and_ask_nothing() {
     let (uri, mut seen) = serve(false, None).await;
-    let skills = Skills::new(&uri).unwrap();
+    let objectives = reader(&uri);
     // The types of service data and metadata are placeholders in the registry.
-    assert!(skills.service_data(SVC_A).await.unwrap().is_empty());
-    assert!(skills.service_metadata(SVC_A).await.unwrap().is_empty());
-    assert!(skills.load_benchmarks("not hex").await.unwrap().is_empty());
+    assert!(objectives.service_data(SVC_A).await.unwrap().is_empty());
+    assert!(objectives.service_metadata(SVC_A).await.unwrap().is_empty());
+    assert!(objectives
+        .load_benchmarks("not hex")
+        .await
+        .unwrap()
+        .is_empty());
     assert!(seen.try_recv().is_err());
 }
 
 #[tokio::test]
 async fn an_explorer_that_refuses_is_an_error_with_its_status() {
     let (uri, _seen) = serve(false, Some(400)).await;
-    let error = Skills::new(&uri).unwrap().load_skills().await.unwrap_err();
+    let error = reader(&uri).load_objectives().await.unwrap_err();
     assert!(
         matches!(
             error,
@@ -298,20 +317,74 @@ async fn an_explorer_that_does_not_answer_is_unreachable() {
     let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let uri = closed.local_addr().unwrap().to_string();
     drop(closed);
-    let error = Skills::new(&uri).unwrap().load_skills().await.unwrap_err();
+    let error = reader(&uri).load_objectives().await.unwrap_err();
     assert!(error.is_unreachable(), "{error}");
 }
 
 #[test]
 fn the_address_of_the_explorer_is_checked() {
-    assert!(Skills::new("").is_err());
-    assert!(Skills::new("http://").is_err());
-    assert!(Skills::new("127.0.0.1:notaport").is_err());
-    assert!(Skills::new("127.0.0.1:9053").is_ok());
-    assert!(Skills::new("http://[::1]:9053/prefix/").is_ok());
+    assert!(Objectives::new("").is_err());
+    assert!(Objectives::new("http://").is_err());
+    assert!(Objectives::new("127.0.0.1:notaport").is_err());
+    assert!(Objectives::new("127.0.0.1:9053").is_ok());
+    assert!(Objectives::new("http://[::1]:9053/prefix/").is_ok());
     #[cfg(not(feature = "tls"))]
-    assert!(Skills::new("https://api.ergoplatform.com").is_err());
+    assert!(Objectives::new("https://api.ergoplatform.com").is_err());
     #[cfg(feature = "tls")]
-    assert!(Skills::new("https://api.ergoplatform.com").is_ok());
+    assert!(Objectives::new("https://api.ergoplatform.com").is_ok());
     let _ = InfoMode::Source;
+}
+
+#[tokio::test]
+async fn without_an_objective_type_id_the_list_is_empty_and_asks_nothing() {
+    let (uri, mut seen) = serve(false, None).await;
+    let objectives = Objectives::new(&uri).unwrap();
+    assert!(objectives.type_ids().objective.is_empty());
+    assert!(objectives.load_objectives().await.unwrap().is_empty());
+    assert!(seen.try_recv().is_err());
+    // The type ids of the other kinds have defaults.
+    assert_eq!(objectives.type_ids().benchmark, BENCHMARK_TYPE_ID);
+    assert_eq!(objectives.type_ids().coverage, COVERAGE_TYPE_ID);
+    assert_eq!(objectives.type_ids().result, RESULT_TYPE_ID);
+}
+
+#[test]
+fn a_type_id_is_checked_and_can_be_overridden() {
+    let base = Objectives::new("127.0.0.1:9053").unwrap();
+    for bad in ["abc", "zz", &"zz".repeat(32), &"ab".repeat(33)] {
+        let error = base.clone().with_objective_type_id(bad).unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "{error}");
+        assert!(error.to_string().contains("64 hex"), "{error}");
+        assert!(base.clone().with_benchmark_type_id(bad).is_err());
+        assert!(base.clone().with_coverage_type_id(bad).is_err());
+        assert!(base.clone().with_result_type_id(bad).is_err());
+    }
+    let upper = OBJECTIVE_TYPE.to_ascii_uppercase();
+    let set = base
+        .clone()
+        .with_objective_type_id(&upper)
+        .unwrap()
+        .with_benchmark_type_id(&"11".repeat(32))
+        .unwrap();
+    assert_eq!(set.type_ids().objective, OBJECTIVE_TYPE);
+    assert_eq!(set.type_ids().benchmark, "11".repeat(32));
+    // An empty id clears the objective type and gives back the default of the others.
+    let cleared = set
+        .with_objective_type_id("")
+        .unwrap()
+        .with_benchmark_type_id("")
+        .unwrap();
+    assert!(cleared.type_ids().objective.is_empty());
+    assert_eq!(cleared.type_ids().benchmark, BENCHMARK_TYPE_ID);
+}
+
+#[tokio::test]
+async fn an_overridden_benchmark_type_id_is_the_one_that_is_searched() {
+    let (uri, mut seen) = serve(false, None).await;
+    let other = "ee55".repeat(16);
+    let objectives = reader(&uri).with_benchmark_type_id(&other).unwrap();
+    let benchmarks = objectives.load_benchmarks(OBJECTIVE).await.unwrap();
+    assert!(benchmarks.is_empty());
+    let (_, request) = seen.recv().await.unwrap();
+    assert_eq!(request["registers"]["R4"], other);
 }

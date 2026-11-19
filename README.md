@@ -20,7 +20,7 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::instance`, `manager` | The pool of dependencies: reuse, idle stop, zombies, `shutdown`; `add_service` by hash and `add_package` from a `.bee` file (checked block by block); `add_directory_package` from `__services__/<hash>` and `__metadata__/<hash>` directories (read with `bee_rpc::store`); per-dependency options; start retries; `Lease::call` records how a call went; LIFO reuse; `tcp_is_alive`; optional check of the start receipt. |
 | `service-library::resources` | `ResourceManager`: a memory pool that asks the node for more (`ModifyServiceSystemResources`) when a lock does not fit and shrinks when it is freed; `lock`, `lock_for`, `try_lock`, `stats`. |
 | `service-library::packer` | A client of the packer service ([`celaut-packer-service`](https://github.com/bee-rpc-protocol/celaut-packer-service)): `health`, `pack` (a zip in, a `.bee` out, the id checked), `has_dependency` and `upload_dependency`. Plain HTTP over TCP, no HTTP crate. Tested against an in-process server. `celaut pack` is the command. |
-| `service-library::skills` | A reader of the [skills registry](https://github.com/celaut-project/skills) (problems on Ergo, with the services that cover them and their benchmarks): `load_skills`, `load_coverages`, `load_benchmarks`, `load_results`, `load_skill_tree`, `service_data`, `service_metadata`. The same queries as its MCP server, read from an Ergo Explorer; `https` needs the feature `tls`. Read only. Tested against an in-process Explorer and read once from the public one. `celaut skills`, `skill`, `covering` and `service-info` are the commands. |
+| `service-library::objectives` | A reader of the [Celaut Registry](https://github.com/celaut-project/registry) (objectives on Ergo, with the services that cover them and their benchmarks): `load_objectives`, `load_coverages`, `load_benchmarks`, `load_results`, `load_objective_tree`, `service_data`, `service_metadata`. It makes the same queries as the MCP server of the registry, and reads from an Ergo Explorer. `https` needs the feature `tls`. It is read only. The id of the objective type has no default: see [The type ids of the registry](#the-type-ids-of-the-registry). Tested against an in-process Explorer. `celaut objectives`, `objective`, `covering` and `service-info` are the commands. |
 | `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
 | `service-library::relay`, `skips`, `counter` | Sends a service to the node with an early answer: a node that has it stops the transfer, and a node that holds some blocks makes the library skip them. Ported from chatui with its tests against an in-process node. |
 | `service-library::statement`, `verifier` | The signed balance statements of nodo (nodo#631), ported from chatui with its vectors: `Gateway::balance_statement` reads the account of an instance or of a descendant, within a budget, and `statement::verify` checks the signature, the hash chain, the head and the balance. `Verifier` is the optional verifier: it reads the instances of the service and their children and grandchildren and reports a stop that the service did not ask for, MU kept, a refund that is not in the ledger, a refused or bad statement. A read costs MU, so it has a budget. `DependencyManager::verify` and `spawn_verifier` run it over the pool. `celaut verify` is the command. |
@@ -31,7 +31,7 @@ The library of a Celaut service, in Rust. It is the rewrite of
 ## `celaut`: the command, for a service in any language
 
 A service that is not written in Rust copies `celaut` into its image and runs it. It is a
-static binary (about 1.7 MB, and about 1 MB more with `https` for the skills registry; about 1 MB of memory while a command runs, no process that
+static binary (about 1.7 MB, and about 1 MB more with `https` for the Celaut Registry; about 1 MB of memory while a command runs, no process that
 stays) for each architecture of a node. Each tag `v*` publishes it in the releases:
 `celaut-linux-amd64` and `celaut-linux-arm64`, with their `.sha256`.
 
@@ -55,7 +55,7 @@ celaut shutdown                      # stop every instance, when the service end
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
 service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
-`metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `account` (the signed statement of the own account of this service, within a `--budget` of MU), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `skills`, `skill`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
+`metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `account` (the signed statement of the own account of this service, within a `--budget` of MU), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `objectives`, `objective`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines; `data` holds the fields of the event: the session, the packets with their peer, the notices), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
 `celaut resize --mem` asks the node directly.
@@ -64,8 +64,25 @@ To build it yourself, static, as the release does:
 
     cargo build --release -p celaut-cli --target aarch64-unknown-linux-musl   # CC=musl-gcc
 
-Add `--no-default-features` for a binary without `https` (about 1 MB smaller): `celaut skills`
+Add `--no-default-features` for a binary without `https` (about 1 MB smaller): `celaut objectives`
 then needs `--explorer http://...`.
+
+## The type ids of the registry
+
+Each kind of box in the Celaut Registry has a Type NFT. The reader needs its id to search for the
+boxes. The id of the objective type has **no default**. Until you set it, `load_objectives`
+gives an empty list and makes no network call, and `celaut objectives` prints `[]` and a hint
+on stderr. Set it in one of three ways:
+
+- In Rust: `Objectives::new(url)?.with_objective_type_id(HEX)?`.
+- With the variable `CELAUT_OBJECTIVE_TYPE_ID` (`Objectives::from_env` reads it).
+- With the global flag `--objective-type-id HEX` of `celaut`. The flag wins over the variable.
+
+The ids of the benchmark, coverage and result types have defaults. Override them in the same
+way: `with_benchmark_type_id`, `with_coverage_type_id`, `with_result_type_id`; the variables
+`CELAUT_BENCHMARK_TYPE_ID`, `CELAUT_COVERAGE_TYPE_ID`, `CELAUT_RESULT_TYPE_ID`; the flags
+`--benchmark-type-id`, `--coverage-type-id`, `--result-type-id`. An id that is not empty must
+have 64 hex characters. If it does not, you get an error (`Error::Config`, exit code 1).
 
 ## Not done yet
 

@@ -19,11 +19,11 @@ use service_library::gateway::{amount, Gateway, Node};
 use service_library::manager::tcp_is_alive;
 use service_library::network;
 use service_library::notice;
+use service_library::objectives::Objectives;
 use service_library::observe::ObserveOptions;
 use service_library::package::{self, PackageInfo};
 use service_library::packer::Packer;
 use service_library::resources::Resizer;
-use service_library::skills::Skills;
 use service_library::statement::{KeptHead, StatementError};
 use service_library::verifier::{Expectation, Verifier, VerifierConfig, VerifierError};
 use service_library::Error;
@@ -63,13 +63,16 @@ Commands:
   pack      <lease> <project.zip> --out FILE [--wait SECS (60)] [--uri IP:PORT]
                                pack a project with the packer service (the instance of
                                <lease>, or --uri): {service, path, size}
-  skills    [--explorer URL]   the skills of the on-chain registry (celaut-project/skills)
-  skill     <box-id> [--no-inherit]
-                               a skill, the services that cover it, its benchmarks and results,
-                               with what the skills that it extends have (inheritedFrom)
+  objectives [--explorer URL]  the objectives of the Celaut Registry (celaut-project/registry).
+                               It needs the objective type id: --objective-type-id or the
+                               variable CELAUT_OBJECTIVE_TYPE_ID. With none, it gives []
+  objective <box-id> [--no-inherit]
+                               an objective, the services that cover it, its benchmarks and
+                               results, with what the objectives that it extends have
+                               (inheritedFrom)
   covering  <box-id> [--no-inherit]
-                               only the services that cover a skill (and the skills that it
-                               extends): [{serviceId, ...}]
+                               only the services that cover an objective (and the objectives
+                               that it extends): [{serviceId, ...}]
   service-info <service-id>    what the chain says of a service: {data, metadata}
   deposit   <lease> <MU>       move MU to the instance (negative: back to you)
   tunnel    <lease> --slot N   send stdin to a port of the instance; the answer to stdout
@@ -106,6 +109,11 @@ GLOBAL:
   --peer-id ID                 the identity of the node, that the receipts must name
   --require-receipt            refuse an instance with no start receipt
   --no-receipt-check           do not check the start receipt
+  --objective-type-id HEX      the Type NFT id of an objective (64 hex characters, no default;
+                               or $CELAUT_OBJECTIVE_TYPE_ID). With none, `objectives` gives []
+  --benchmark-type-id HEX      the same for a benchmark, a coverage and a result: each has a
+  --coverage-type-id HEX       default. The variables are $CELAUT_BENCHMARK_TYPE_ID,
+  --result-type-id HEX         $CELAUT_COVERAGE_TYPE_ID and $CELAUT_RESULT_TYPE_ID
 
 Exit codes: 0 done, 1 refused or failed, 2 bad arguments, 3 the node is unreachable.
 ";
@@ -286,7 +294,6 @@ fn configuration(args: &Args) -> Res<Configuration> {
         .map(|n| Amount { n: n.to_string() });
     Ok(Configuration {
         environment_variables: env,
-        spec_slot: Vec::new(),
         initial_mu,
     })
 }
@@ -687,27 +694,45 @@ async fn run(args: Args) -> Res<Value> {
                 "size": packed.size,
             }))
         }
-        "skills" | "skill" | "covering" | "service-info" => {
-            let skills = match args.value("explorer") {
-                Some(url) => Skills::new(url)?,
-                None => Skills::from_env()?,
+        "objectives" | "objective" | "covering" | "service-info" => {
+            let mut objectives = match args.value("explorer") {
+                Some(url) => Objectives::new(url)?.with_type_ids_from_env()?,
+                None => Objectives::from_env()?,
             };
+            // A flag wins over the variable.
+            if let Some(id) = args.value("objective-type-id") {
+                objectives = objectives.with_objective_type_id(id)?;
+            }
+            if let Some(id) = args.value("benchmark-type-id") {
+                objectives = objectives.with_benchmark_type_id(id)?;
+            }
+            if let Some(id) = args.value("coverage-type-id") {
+                objectives = objectives.with_coverage_type_id(id)?;
+            }
+            if let Some(id) = args.value("result-type-id") {
+                objectives = objectives.with_result_type_id(id)?;
+            }
+            if matches!(command, "objectives" | "objective")
+                && objectives.type_ids().objective.is_empty()
+            {
+                eprintln!("celaut: no objective type id. Set it with --objective-type-id or CELAUT_OBJECTIVE_TYPE_ID.");
+            }
             match command {
-                "skills" => Ok(serde_json::to_value(skills.load_skills().await?)
+                "objectives" => Ok(serde_json::to_value(objectives.load_objectives().await?)
                     .map_err(|e| Fail::Other(e.to_string()))?),
-                "skill" => Ok(serde_json::to_value(
-                    skills
-                        .load_skill_tree_with(
-                            args.word(1, "the box id of the skill")?,
+                "objective" => Ok(serde_json::to_value(
+                    objectives
+                        .load_objective_tree_with(
+                            args.word(1, "the box id of the objective")?,
                             !args.has("no-inherit"),
                         )
                         .await?,
                 )
                 .map_err(|e| Fail::Other(e.to_string()))?),
                 "covering" => Ok(serde_json::to_value(
-                    skills
+                    objectives
                         .load_coverages_inherited(
-                            args.word(1, "the box id of the skill")?,
+                            args.word(1, "the box id of the objective")?,
                             !args.has("no-inherit"),
                         )
                         .await?,
@@ -716,8 +741,8 @@ async fn run(args: Args) -> Res<Value> {
                 _ => {
                     let id = args.word(1, "the service id")?;
                     Ok(json!({
-                        "data": skills.service_data(id).await?,
-                        "metadata": skills.service_metadata(id).await?,
+                        "data": objectives.service_data(id).await?,
+                        "metadata": objectives.service_metadata(id).await?,
                     }))
                 }
             }

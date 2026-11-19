@@ -10,7 +10,7 @@ name = "celaut"
 path = "src/main.rs"
 
 [features]
-# https for the skills registry (the public Explorer): about 1 MB more in the binary.
+# https for the Celaut Registry (the public Explorer): about 1 MB more in the binary.
 # `--no-default-features` builds the small one, for an Explorer on http://.
 default = ["tls"]
 tls = ["service-library/tls"]

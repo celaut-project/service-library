@@ -183,30 +183,38 @@ service and to clients. A service talks to one gateway.
 ## Finding a service by the problem it solves
 
 A service that needs a capability (sort sats, summarize Markdown, solve SAT) does not need to
-know which service has it. The registry of
-[`celaut-project/skills`](https://github.com/celaut-project/skills) lists *skills* (problems) on
-the Ergo blockchain, and for each one the services that cover it (*coverages*), how it is
+know which service has it. The Celaut Registry
+([`celaut-project/registry`](https://github.com/celaut-project/registry)) lists *objectives*
+(problems) on the Ergo blockchain, and for each one the services that cover it (*coverages*), how it is
 measured (*benchmarks*) and how each service did (*results*). The library reads it
-(`service_library::skills`, `celaut skills`); it only reads. Publishing needs the wallet of a
+(`service_library::objectives`, `celaut objectives`); it only reads. Publishing needs the wallet of a
 person to sign a transaction: the MCP server of the registry has `create_*` tools for it (it
 signs with a seed in its environment, or returns the unsigned transaction), and this library
 has nothing of that.
 
-**Extended skills.** A skill that lists others in `extended_skill_boxes` inherits their services
-and benchmarks, through any depth. The one that extends is the parent: a general skill (say
-"pack a service") extends the specific ones (from a Dockerfile, from Nix), and the services of
-the specific ones are services of the general one, never the other way. `celaut skill` and
-`celaut covering` do this by default, and mark what comes from an extended skill with
-`inheritedFrom`; `--no-inherit` gives only the own. `extends` and `extendedBy` list the skills
-at each side. It is the rule of `applySkillInheritance` in the registry.
+**The type id.** The reader needs the Type NFT id of the objective type, and it has no default.
+Set it with the flag `--objective-type-id HEX` or the variable `CELAUT_OBJECTIVE_TYPE_ID`
+(in Rust: `Objectives::with_objective_type_id`). With no id, `celaut objectives` gives `[]`,
+makes no network call, and prints a one-line hint on stderr. An id must have 64 hex
+characters. The ids of benchmarks, coverages and results have defaults, and you can override
+them (`--benchmark-type-id`, `--coverage-type-id`, `--result-type-id`, and the variables
+`CELAUT_BENCHMARK_TYPE_ID`, `CELAUT_COVERAGE_TYPE_ID`, `CELAUT_RESULT_TYPE_ID`).
 
-1. `celaut skills` (`Skills::load_skills`): every skill, with `boxId`, `name`, `prose`, `tags`.
+**Extended objectives.** An objective that lists others in `extended_objective_boxes` inherits
+their services and benchmarks, through any depth. The one that extends is the parent: a general
+objective (say "pack a service") extends the specific ones (from a Dockerfile, from Nix), and
+the services of the specific ones are services of the general one, never the other way.
+`celaut objective` and `celaut covering` do this by default, and mark what comes from an
+extended objective with `inheritedFrom`; `--no-inherit` gives only the own. `extends` and
+`extendedBy` list the objectives at each side. It is the inheritance rule of the registry.
+
+1. `celaut objectives` (`Objectives::load_objectives`): every objective, with `boxId`, `name`, `prose`, `tags`.
    Match the name, tags and prose with what you need. There is no search call: the list is
    short.
-2. `celaut skill <boxId>` (`load_skill_tree`; `load_skill_tree_with(id, false)` for no
-   inheritance): the skill, its `coverages` (`serviceId`: the services that solve it), and its
+2. `celaut objective <boxId>` (`load_objective_tree`; `load_objective_tree_with(id, false)` for
+   no inheritance): the objective, its `coverages` (`serviceId`: the services that solve it), and its
    `benchmarks` with their `results` and their own `coverages` (the services that *run* the
-   benchmark, which are not solutions of the skill). A result has `data[].metricsValues`, which go by position
+   benchmark, which are not solutions of the objective). A result has `data[].metricsValues`, which go by position
    with the `performanceMetrics` of its benchmark (`name`, `higherIsBetter`). `celaut covering
    <boxId>` gives only the services.
 3. Pick a service. A coverage is a claim of whoever published it, and anyone can publish one:
@@ -220,8 +228,8 @@ at each side. It is the rule of `applySkillInheritance` in the registry.
    you have the package, `--package FILE`.
 
 ```sh
-celaut skills | jq -r '.[] | [.boxId, .name] | @tsv'
-celaut covering "$SKILL_BOX_ID" | jq -r '.[].serviceId'
+celaut objectives | jq -r '.[] | [.boxId, .name] | @tsv'
+celaut covering "$OBJECTIVE_BOX_ID" | jq -r '.[].serviceId'
 celaut acquire --service "$SERVICE_ID"
 ```
 
@@ -314,15 +322,15 @@ instance may use this call.
 - Checking that the id of the service in a package is the hash of its whole Service: the
   blocks are checked one by one, and the node checks the rest.
 - Tests against a real node: everything here is tested against a fake node and the vectors
-  of nodo only. The skills registry was read from the public Explorer (7 skills at the time,
-  one with 4 coverages and 5 benchmarks), but a service found there was never started.
+  of nodo only. The registry was read once from the public Explorer (7 objectives at the time, under
+  the old name; one with 4 coverages and 5 benchmarks), but a service found there was never started.
 - The verifier (`verifier`, `celaut verify`) was tested against an in-process node that signs
   its own ledgers, and the checks of `statement` against the vectors of chatui, which came from
   a script that follows nodo and not from a real node. Reading the statement of an instance
   from inside a real service, and the ancestors that a relay hides (`relayed`), were not tried.
   `celaut verify` keeps no state between runs: each run reads from the first movement, within
   its budget.
-- Publishing skills, coverages, benchmarks and results. The MCP server of the registry does it
-  (`create_skill` and the others); this library only reads. The extended skills were checked
-  against a fake Explorer and against the JS of the registry, but no skill of the public
-  registry extends another yet, so the inheritance was not read for real.
+- Publishing objectives, coverages, benchmarks and results. The MCP server of the registry does
+  it (`create_objective` and the others); this library only reads. The extended objectives were
+  checked against a fake Explorer and against the JS of the registry, but no objective of the
+  public registry extends another yet, so the inheritance was not read for real.

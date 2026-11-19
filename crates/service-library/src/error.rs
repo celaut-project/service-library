@@ -41,7 +41,7 @@ pub enum Error {
         /// What the packer said, or what went wrong.
         message: String,
     },
-    /// A call to the skills registry (an Ergo Explorer) failed (see [`crate::skills`]).
+    /// A call to the Celaut Registry (an Ergo Explorer) failed (see [`crate::objectives`]).
     #[error("{operation} failed{}: {message}", status.map(|s| format!(" (HTTP {s})")).unwrap_or_default())]
     Registry {
         /// What the call did, for a person.

@@ -1,18 +1,30 @@
-//! A reader of the Celaut skills registry, to find a service by the problem it solves.
+//! A reader of the Celaut Registry, to find a service by the problem it solves.
 //!
-//! [`celaut-project/skills`](https://github.com/celaut-project/skills) is a registry on the
-//! Ergo blockchain. A *skill* names a problem, a *coverage* says that a service addresses it,
+//! [`celaut-project/registry`](https://github.com/celaut-project/registry) is a registry on the
+//! Ergo blockchain. An *objective* names a problem, a *coverage* says that a service addresses it,
 //! a *benchmark* says how to measure it and a *result* is the measure of one service. A
-//! service that needs a capability asks the registry for the skill, takes the service ids
+//! service that needs a capability asks the registry for the objective, takes the service ids
 //! that cover it, and starts the best one as a dependency
 //! ([`crate::manager::DependencyManager::add_service`]).
 //!
 //! This is the read side only, the same as the MCP server of that repository (`MCP.md`), and
 //! it makes the same queries, so both read the same data. The registry has no server: every
 //! read is a search of the boxes of the reputation contract in an
-//! [Ergo Explorer](https://github.com/ergoplatform/explorer-backend) (`Skills::new`; the
+//! [Ergo Explorer](https://github.com/ergoplatform/explorer-backend) (`Objectives::new`; the
 //! public one is [`DEFAULT_EXPLORER`]). Publishing is not here: it needs the wallet of a
 //! person to sign a transaction, and the registry has no command for it either.
+//!
+//! # Type ids
+//!
+//! Each kind of box has a Type NFT. The reader needs its id to search for the boxes. The id of
+//! the objective type has no default: you must set it, or [`Objectives::load_objectives`]
+//! gives an empty list and makes no network call. There are three ways to set it. Call
+//! [`Objectives::with_objective_type_id`]. Or set the variable `CELAUT_OBJECTIVE_TYPE_ID`
+//! (read by [`Objectives::from_env`]). Or give the flag `--objective-type-id` to the `celaut`
+//! command. The ids of the benchmark, the coverage and the result have defaults. You can
+//! override them in the same way (`CELAUT_BENCHMARK_TYPE_ID`, `CELAUT_COVERAGE_TYPE_ID`,
+//! `CELAUT_RESULT_TYPE_ID`). A non-empty id must have 64 hex characters, or you get an
+//! [`Error::Config`].
 //!
 //! The public Explorer is `https`, so the feature `tls` has to be on for it (rustls with the
 //! roots of Mozilla). Without it only `http://` works, for an Explorer of your own or a
@@ -22,7 +34,7 @@
 //! A search that finds nothing is an empty list, and a registry that does not answer is an
 //! [`Error::Registry`] (with [`Error::is_unreachable`] true). The ids of the types of
 //! service data and metadata are not minted yet (the registry has placeholders), and then
-//! [`Skills::service_data`] and [`Skills::service_metadata`] give an empty list, as the MCP
+//! [`Objectives::service_data`] and [`Objectives::service_metadata`] give an empty list, as the MCP
 //! server does.
 
 use std::time::Duration;
@@ -34,14 +46,21 @@ use tokio::net::TcpStream;
 
 use crate::Error;
 
-/// The Type NFT of a skill (`celaut:skill:v1`).
-pub const SKILL_TYPE_ID: &str = "ffce59c01b9c0c245005f9c2daf817607e912a3ececd5f61aaba48d30230f60c";
-/// The Type NFT of a benchmark (`celaut:benchmark:v1`).
+/// The name of the variable with the Type NFT of an objective (`celaut:objective:v1`).
+pub const OBJECTIVE_TYPE_ENV: &str = "CELAUT_OBJECTIVE_TYPE_ID";
+/// The name of the variable with the Type NFT of a benchmark.
+pub const BENCHMARK_TYPE_ENV: &str = "CELAUT_BENCHMARK_TYPE_ID";
+/// The name of the variable with the Type NFT of a coverage.
+pub const COVERAGE_TYPE_ENV: &str = "CELAUT_COVERAGE_TYPE_ID";
+/// The name of the variable with the Type NFT of a result.
+pub const RESULT_TYPE_ENV: &str = "CELAUT_RESULT_TYPE_ID";
+
+/// The default Type NFT of a benchmark (`celaut:benchmark:v1`).
 pub const BENCHMARK_TYPE_ID: &str =
     "f6480184daf3b7750a58e58319e12adc5266bd986eec0f57ac451c995a30f54d";
-/// The Type NFT of a result (`celaut:result:v1`).
+/// The default Type NFT of a result (`celaut:result:v1`).
 pub const RESULT_TYPE_ID: &str = "49b26dc06b1680769477264d2e8e9bf561005236cde3097630bffcff631b7aef";
-/// The Type NFT of a coverage (`celaut:coverage:v1`).
+/// The default Type NFT of a coverage (`celaut:coverage:v1`).
 pub const COVERAGE_TYPE_ID: &str =
     "1da6799e935cbb0fb14d359f06f23854c3d1bd509508948cc01b7b018dbbbdf5";
 /// The Type NFT of the functional part of a service (`celaut:service-data:v1`). A
@@ -76,7 +95,7 @@ const MAX_HEAD: usize = 64 * 1024;
 /// A problem that services can solve.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Skill {
+pub struct Objective {
     /// The id of its box: what the other calls ask for.
     pub box_id: String,
     /// Who published it: the token of its reputation proof.
@@ -88,12 +107,12 @@ pub struct Skill {
     pub formal: String,
     pub tags: Vec<String>,
     pub domain: String,
-    /// The skills that this one extends.
-    pub extended_skill_box_ids: Vec<String>,
+    /// The objectives that this one extends.
+    pub extended_objective_box_ids: Vec<String>,
     pub source_hash: Option<String>,
 }
 
-/// The assertion that a service addresses a skill.
+/// The assertion that a service addresses an objective.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Coverage {
@@ -102,10 +121,10 @@ pub struct Coverage {
     /// The id of the service, in hex, which [`crate::manager::DependencyManager::add_service`]
     /// takes. A coverage from a result has it always.
     pub service_id: Option<String>,
-    /// Set for a coverage of a benchmark (see [`Skills::load_benchmark_coverages`]); `None`
-    /// for a coverage of a skill.
+    /// Set for a coverage of a benchmark (see [`Objectives::load_benchmark_coverages`]); `None`
+    /// for a coverage of an objective.
     pub benchmark_id: Option<String>,
-    /// The box id of the extended skill that owns this coverage, when the skill got it by
+    /// The box id of the extended objective that owns this coverage, when the objective got it by
     /// extending that one. `None` for an own coverage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
@@ -128,13 +147,13 @@ pub struct Metric {
     pub higher_is_better: Option<bool>,
 }
 
-/// How to measure a skill.
+/// How to measure an objective.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Benchmark {
     pub id: String,
     pub profile_id: String,
-    pub skill_box_id: String,
+    pub objective_box_id: String,
     pub name: String,
     pub description: String,
     pub case_descriptors: Vec<CaseDescriptor>,
@@ -173,32 +192,32 @@ pub struct BenchmarkTree {
     #[serde(flatten)]
     pub benchmark: Benchmark,
     pub results: Vec<Measure>,
-    /// The box id of the extended skill that owns this benchmark, when it was inherited.
+    /// The box id of the extended objective that owns this benchmark, when it was inherited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherited_from: Option<String>,
-    /// The services that run this benchmark. They are not the ones that solve the skill: a
+    /// The services that run this benchmark. They are not the ones that solve the objective: a
     /// service with a result is a solution, and this is who can measure the others.
     pub coverages: Vec<Coverage>,
 }
 
-/// A skill with the services that cover it and how they were measured.
+/// An objective with the services that cover it and how they were measured.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillTree {
-    /// `None` if there is no skill with that box id.
-    pub skill: Option<Skill>,
+pub struct ObjectiveTree {
+    /// `None` if there is no objective with that box id.
+    pub objective: Option<Objective>,
     pub coverages: Vec<Coverage>,
     pub benchmarks: Vec<BenchmarkTree>,
-    /// The skills that this one extends, directly or not, nearest first.
-    pub extends: Vec<SkillRef>,
-    /// The skills that extend this one directly.
-    pub extended_by: Vec<SkillRef>,
+    /// The objectives that this one extends, directly or not, nearest first.
+    pub extends: Vec<ObjectiveRef>,
+    /// The objectives that extend this one directly.
+    pub extended_by: Vec<ObjectiveRef>,
 }
 
-/// A skill, by its box and its name.
+/// An objective, by its box and its name.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillRef {
+pub struct ObjectiveRef {
     pub box_id: String,
     pub name: String,
 }
@@ -245,10 +264,44 @@ pub struct ServiceMetadata {
     pub tags: Option<Vec<String>>,
 }
 
+/// The Type NFT ids that the reader searches for. See the [module](self#type-ids) docs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeIds {
+    /// The objective type. Empty by default: the reader then finds no objective.
+    pub objective: String,
+    pub benchmark: String,
+    pub coverage: String,
+    pub result: String,
+}
+
+impl Default for TypeIds {
+    fn default() -> Self {
+        TypeIds {
+            objective: String::new(),
+            benchmark: BENCHMARK_TYPE_ID.to_string(),
+            coverage: COVERAGE_TYPE_ID.to_string(),
+            result: RESULT_TYPE_ID.to_string(),
+        }
+    }
+}
+
+/// Check a Type NFT id: 64 hex characters.
+fn check_type_id(what: &str, id: &str) -> Result<String, Error> {
+    let id = id.trim();
+    if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(id.to_ascii_lowercase())
+    } else {
+        Err(Error::Config(format!(
+            "the {what} type id must have 64 hex characters, but it is \"{id}\""
+        )))
+    }
+}
+
 /// The registry, as read from an Explorer.
 #[derive(Debug, Clone)]
-pub struct Skills {
+pub struct Objectives {
     explorer: Endpoint,
+    types: TypeIds,
 }
 
 #[derive(Debug, Clone)]
@@ -260,50 +313,130 @@ struct Endpoint {
     prefix: String,
 }
 
-impl Skills {
+impl Objectives {
     /// The registry as the Explorer at `explorer` shows it: `https://host[:port][/prefix]`
     /// (needs the feature `tls`), `http://host[:port][/prefix]`, or `host:port` for plain
     /// HTTP. [`DEFAULT_EXPLORER`] is the public one.
     pub fn new(explorer: &str) -> Result<Self, Error> {
-        Ok(Skills {
+        Ok(Objectives {
             explorer: Endpoint::parse(explorer)?,
+            types: TypeIds::default(),
         })
     }
 
-    /// The registry as the public Explorer shows it, or the one of `CELAUT_EXPLORER_API`.
-    pub fn from_env() -> Result<Self, Error> {
-        match std::env::var("CELAUT_EXPLORER_API") {
-            Ok(url) if !url.trim().is_empty() => Skills::new(url.trim()),
-            _ => Skills::new(DEFAULT_EXPLORER),
-        }
+    /// The type ids that the reader uses now.
+    pub fn type_ids(&self) -> &TypeIds {
+        &self.types
     }
 
-    /// Every skill of the registry (up to 100).
-    pub async fn load_skills(&self) -> Result<Vec<Skill>, Error> {
-        let boxes = self.boxes("load_skills", SKILL_TYPE_ID, None).await?;
+    /// Set the Type NFT id of an objective. An empty id clears it: the reader then finds no
+    /// objective. A non-empty id must have 64 hex characters.
+    pub fn with_objective_type_id(mut self, id: &str) -> Result<Self, Error> {
+        self.types.objective = if id.trim().is_empty() {
+            String::new()
+        } else {
+            check_type_id("objective", id)?
+        };
+        Ok(self)
+    }
+
+    /// Set the Type NFT id of a benchmark. An empty id gives back the default.
+    pub fn with_benchmark_type_id(mut self, id: &str) -> Result<Self, Error> {
+        self.types.benchmark = if id.trim().is_empty() {
+            BENCHMARK_TYPE_ID.to_string()
+        } else {
+            check_type_id("benchmark", id)?
+        };
+        Ok(self)
+    }
+
+    /// Set the Type NFT id of a coverage. An empty id gives back the default.
+    pub fn with_coverage_type_id(mut self, id: &str) -> Result<Self, Error> {
+        self.types.coverage = if id.trim().is_empty() {
+            COVERAGE_TYPE_ID.to_string()
+        } else {
+            check_type_id("coverage", id)?
+        };
+        Ok(self)
+    }
+
+    /// Set the Type NFT id of a result. An empty id gives back the default.
+    pub fn with_result_type_id(mut self, id: &str) -> Result<Self, Error> {
+        self.types.result = if id.trim().is_empty() {
+            RESULT_TYPE_ID.to_string()
+        } else {
+            check_type_id("result", id)?
+        };
+        Ok(self)
+    }
+
+    /// Read the four type id variables (`CELAUT_OBJECTIVE_TYPE_ID` and the others). A variable
+    /// that is not set, or is empty, changes nothing.
+    pub fn with_type_ids_from_env(mut self) -> Result<Self, Error> {
+        let get = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        if let Some(id) = get(OBJECTIVE_TYPE_ENV) {
+            self = self.with_objective_type_id(&id)?;
+        }
+        if let Some(id) = get(BENCHMARK_TYPE_ENV) {
+            self = self.with_benchmark_type_id(&id)?;
+        }
+        if let Some(id) = get(COVERAGE_TYPE_ENV) {
+            self = self.with_coverage_type_id(&id)?;
+        }
+        if let Some(id) = get(RESULT_TYPE_ENV) {
+            self = self.with_result_type_id(&id)?;
+        }
+        Ok(self)
+    }
+
+    /// The registry as the public Explorer shows it, or the one of `CELAUT_EXPLORER_API`. The
+    /// type ids come from the variables `CELAUT_OBJECTIVE_TYPE_ID`, `CELAUT_BENCHMARK_TYPE_ID`,
+    /// `CELAUT_COVERAGE_TYPE_ID` and `CELAUT_RESULT_TYPE_ID` (see
+    /// [`Objectives::with_type_ids_from_env`]).
+    pub fn from_env() -> Result<Self, Error> {
+        match std::env::var("CELAUT_EXPLORER_API") {
+            Ok(url) if !url.trim().is_empty() => Objectives::new(url.trim()),
+            _ => Objectives::new(DEFAULT_EXPLORER),
+        }?
+        .with_type_ids_from_env()
+    }
+
+    /// Every objective of the registry (up to 100). It is an empty list, with no network call,
+    /// while the objective type id is not set.
+    pub async fn load_objectives(&self) -> Result<Vec<Objective>, Error> {
+        if self.types.objective.is_empty() {
+            return Ok(Vec::new());
+        }
+        let boxes = self
+            .boxes("load_objectives", &self.types.objective, None)
+            .await?;
         Ok(boxes
             .iter()
             .map(|b| {
                 let r9 = register9(b);
-                Skill {
+                Objective {
                     box_id: text(b, "boxId"),
                     profile_id: profile_id(b, &r9),
-                    name: text_or(&r9, "name", "Unnamed Skill"),
+                    name: text_or(&r9, "name", "Unnamed Objective"),
                     prose: text(&r9, "prose"),
                     formal: text(&r9, "formal"),
                     tags: strings(&r9, "tags"),
                     domain: text(&r9, "domain"),
-                    extended_skill_box_ids: strings(&r9, "extended_skill_boxes"),
+                    extended_objective_box_ids: strings(&r9, "extended_objective_boxes"),
                     source_hash: optional_text(&r9, "source_hash"),
                 }
             })
             .collect())
     }
 
-    /// The benchmarks of a skill.
-    pub async fn load_benchmarks(&self, skill_box_id: &str) -> Result<Vec<Benchmark>, Error> {
+    /// The benchmarks of an objective.
+    pub async fn load_benchmarks(&self, objective_box_id: &str) -> Result<Vec<Benchmark>, Error> {
         let boxes = self
-            .boxes("load_benchmarks", BENCHMARK_TYPE_ID, Some(skill_box_id))
+            .boxes(
+                "load_benchmarks",
+                &self.types.benchmark,
+                Some(objective_box_id),
+            )
             .await?;
         Ok(boxes
             .iter()
@@ -312,7 +445,7 @@ impl Skills {
                 Benchmark {
                     id: text(b, "boxId"),
                     profile_id: profile_id(b, &r9),
-                    skill_box_id: skill_box_id.to_string(),
+                    objective_box_id: objective_box_id.to_string(),
                     name: text_or(&r9, "name", "Unnamed Benchmark"),
                     description: text(&r9, "description"),
                     case_descriptors: array(&r9, "case_descriptors")
@@ -342,7 +475,7 @@ impl Skills {
     /// The measures of a benchmark.
     pub async fn load_results(&self, benchmark_id: &str) -> Result<Vec<Measure>, Error> {
         let boxes = self
-            .boxes("load_results", RESULT_TYPE_ID, Some(benchmark_id))
+            .boxes("load_results", &self.types.result, Some(benchmark_id))
             .await?;
         Ok(boxes
             .iter()
@@ -368,12 +501,16 @@ impl Skills {
             .collect())
     }
 
-    /// The services that cover a skill: the coverages that point at it, and the services that
+    /// The services that cover an objective: the coverages that point at it, and the services that
     /// have a result in one of its benchmarks. A service is once, and a direct coverage wins.
     /// This is the call to start from when a service needs a capability.
-    pub async fn load_coverages(&self, skill_box_id: &str) -> Result<Vec<Coverage>, Error> {
+    pub async fn load_coverages(&self, objective_box_id: &str) -> Result<Vec<Coverage>, Error> {
         let boxes = self
-            .boxes("load_coverages", COVERAGE_TYPE_ID, Some(skill_box_id))
+            .boxes(
+                "load_coverages",
+                &self.types.coverage,
+                Some(objective_box_id),
+            )
             .await?;
         let coverage = |b: &Value| {
             let r9 = register9(b);
@@ -387,7 +524,7 @@ impl Skills {
         };
         let direct: Vec<Coverage> = boxes.iter().map(coverage).collect();
         let mut results = Vec::new();
-        for benchmark in self.load_benchmarks(skill_box_id).await? {
+        for benchmark in self.load_benchmarks(objective_box_id).await? {
             results.extend(self.load_results(&benchmark.id).await?);
         }
 
@@ -417,8 +554,8 @@ impl Skills {
     }
 
     /// The services that run a benchmark: the coverages that point at it. A service with a
-    /// result in it is not one (it is a solution of the skill, and is in
-    /// [`Skills::load_coverages`]), and it is not derived here. The registry app makes the
+    /// result in it is not one (it is a solution of the objective, and is in
+    /// [`Objectives::load_coverages`]), and it is not derived here. The registry app makes the
     /// same difference.
     pub async fn load_benchmark_coverages(
         &self,
@@ -427,7 +564,7 @@ impl Skills {
         let boxes = self
             .boxes(
                 "load_benchmark_coverages",
-                COVERAGE_TYPE_ID,
+                &self.types.coverage,
                 Some(benchmark_id),
             )
             .await?;
@@ -452,27 +589,35 @@ impl Skills {
             .collect())
     }
 
-    /// A skill with its coverages, its benchmarks and the measures of each, and what the
-    /// skills that it extends have ([`Skills::load_skill_tree_with`] without it). See
-    /// [`inheritance`](self#extended-skills).
-    pub async fn load_skill_tree(&self, skill_box_id: &str) -> Result<SkillTree, Error> {
-        self.load_skill_tree_with(skill_box_id, true).await
+    /// An objective with its coverages, its benchmarks and the measures of each, and what the
+    /// objectives that it extends have ([`Objectives::load_objective_tree_with`] without it). See
+    /// [`inheritance`](self#extended-objectives).
+    pub async fn load_objective_tree(
+        &self,
+        objective_box_id: &str,
+    ) -> Result<ObjectiveTree, Error> {
+        self.load_objective_tree_with(objective_box_id, true).await
     }
 
-    /// [`Skills::load_skill_tree`], with `inherit` false for only what the skill has itself.
-    pub async fn load_skill_tree_with(
+    /// [`Objectives::load_objective_tree`], with `inherit` false for only what the objective has itself.
+    pub async fn load_objective_tree_with(
         &self,
-        skill_box_id: &str,
+        objective_box_id: &str,
         inherit: bool,
-    ) -> Result<SkillTree, Error> {
-        let skills = self.load_skills().await?;
-        let skill = skills.iter().find(|s| s.box_id == skill_box_id).cloned();
-        let extended = match (&skill, inherit) {
-            (Some(_), true) => collect_extended(&skills, skill_box_id),
+    ) -> Result<ObjectiveTree, Error> {
+        let objectives = self.load_objectives().await?;
+        let objective = objectives
+            .iter()
+            .find(|s| s.box_id == objective_box_id)
+            .cloned();
+        let extended = match (&objective, inherit) {
+            (Some(_), true) => collect_extended(&objectives, objective_box_id),
             _ => Vec::new(),
         };
         let mut pool = std::collections::HashMap::new();
-        for id in std::iter::once(skill_box_id).chain(extended.iter().map(|s| s.box_id.as_str())) {
+        for id in
+            std::iter::once(objective_box_id).chain(extended.iter().map(|s| s.box_id.as_str()))
+        {
             let mut benchmarks = Vec::new();
             for benchmark in self.load_benchmarks(id).await? {
                 let results = self.load_results(&benchmark.id).await?;
@@ -484,10 +629,10 @@ impl Skills {
                     coverages,
                 });
             }
-            let extends = skills
+            let extends = objectives
                 .iter()
                 .find(|s| s.box_id == id)
-                .map(|s| s.extended_skill_box_ids.clone())
+                .map(|s| s.extended_objective_box_ids.clone())
                 .unwrap_or_default();
             pool.insert(
                 id.to_string(),
@@ -498,38 +643,40 @@ impl Skills {
                 },
             );
         }
-        let (coverages, benchmarks) = resolve(skill_box_id, &pool, &mut Default::default());
-        Ok(SkillTree {
-            skill,
+        let (coverages, benchmarks) = resolve(objective_box_id, &pool, &mut Default::default());
+        Ok(ObjectiveTree {
+            objective,
             coverages: dedupe_services(coverages),
             benchmarks,
-            extends: extended.iter().map(skill_ref).collect(),
-            extended_by: collect_extenders(&skills, skill_box_id)
+            extends: extended.iter().map(objective_ref).collect(),
+            extended_by: collect_extenders(&objectives, objective_box_id)
                 .iter()
-                .map(skill_ref)
+                .map(objective_ref)
                 .collect(),
         })
     }
 
-    /// The services that solve a skill, and the ones that solve the skills that it extends
+    /// The services that solve an objective, and the ones that solve the objectives that it extends
     /// (`inherit`): what an agent that needs a capability starts from. A service is once; the
     /// own coverage comes first, then the nearest.
     pub async fn load_coverages_inherited(
         &self,
-        skill_box_id: &str,
+        objective_box_id: &str,
         inherit: bool,
     ) -> Result<Vec<Coverage>, Error> {
         if !inherit {
-            return self.load_coverages(skill_box_id).await;
+            return self.load_coverages(objective_box_id).await;
         }
-        let skills = self.load_skills().await?;
-        let extended = collect_extended(&skills, skill_box_id);
+        let objectives = self.load_objectives().await?;
+        let extended = collect_extended(&objectives, objective_box_id);
         let mut pool = std::collections::HashMap::new();
-        for id in std::iter::once(skill_box_id).chain(extended.iter().map(|s| s.box_id.as_str())) {
-            let extends = skills
+        for id in
+            std::iter::once(objective_box_id).chain(extended.iter().map(|s| s.box_id.as_str()))
+        {
+            let extends = objectives
                 .iter()
                 .find(|s| s.box_id == id)
-                .map(|s| s.extended_skill_box_ids.clone())
+                .map(|s| s.extended_objective_box_ids.clone())
                 .unwrap_or_default();
             pool.insert(
                 id.to_string(),
@@ -540,7 +687,7 @@ impl Skills {
                 },
             );
         }
-        let (coverages, _) = resolve(skill_box_id, &pool, &mut Default::default());
+        let (coverages, _) = resolve(objective_box_id, &pool, &mut Default::default());
         Ok(dedupe_services(coverages))
     }
 
@@ -660,33 +807,33 @@ impl Skills {
     }
 }
 
-// ── Extended skills ──────────────────────────────────────────────────────────
+// ── Extended objectives ──────────────────────────────────────────────────────────
 //
-// A skill that lists another in `extended_skill_boxes` inherits its coverages and benchmarks,
+// An objective that lists another in `extended_objective_boxes` inherits its coverages and benchmarks,
 // through any depth: it is the parent, and the extended one is nested under it. So a general
-// skill extends the specific ones, and the services of the specific ones are services of the
-// general one. The same rule as `applySkillInheritance` in the registry (`core.mjs`), which
+// objective extends the specific ones, and the services of the specific ones are services of the
+// general one. The same as the inheritance rule of the registry (`core.mjs`), which
 // its web app and its MCP server use.
 
-/// What a skill has itself, and what it extends.
+/// What an objective has itself, and what it extends.
 struct Own {
     extends: Vec<String>,
     coverages: Vec<Coverage>,
     benchmarks: Vec<BenchmarkTree>,
 }
 
-fn skill_ref(s: &Skill) -> SkillRef {
-    SkillRef {
+fn objective_ref(s: &Objective) -> ObjectiveRef {
+    ObjectiveRef {
         box_id: s.box_id.clone(),
         name: s.name.clone(),
     }
 }
 
-/// The skills that `box_id` extends, directly or not, nearest first, once each. A cycle is
-/// cut where it closes, `box_id` is not in the list, and an id that is not in `skills` is
+/// The objectives that `box_id` extends, directly or not, nearest first, once each. A cycle is
+/// cut where it closes, `box_id` is not in the list, and an id that is not in `objectives` is
 /// skipped.
-fn collect_extended(skills: &[Skill], box_id: &str) -> Vec<Skill> {
-    let Some(start) = skills.iter().find(|s| s.box_id == box_id) else {
+fn collect_extended(objectives: &[Objective], box_id: &str) -> Vec<Objective> {
+    let Some(start) = objectives.iter().find(|s| s.box_id == box_id) else {
         return Vec::new();
     };
     let mut seen = std::collections::HashSet::from([box_id.to_string()]);
@@ -694,12 +841,12 @@ fn collect_extended(skills: &[Skill], box_id: &str) -> Vec<Skill> {
     let mut level = vec![start];
     while !level.is_empty() {
         let mut next = Vec::new();
-        for skill in level {
-            for id in &skill.extended_skill_box_ids {
+        for objective in level {
+            for id in &objective.extended_objective_box_ids {
                 if !seen.insert(id.clone()) {
                     continue;
                 }
-                if let Some(target) = skills.iter().find(|s| &s.box_id == id) {
+                if let Some(target) = objectives.iter().find(|s| &s.box_id == id) {
                     out.push(target.clone());
                     next.push(target);
                 }
@@ -710,18 +857,18 @@ fn collect_extended(skills: &[Skill], box_id: &str) -> Vec<Skill> {
     out
 }
 
-/// The skills that extend `box_id` directly.
-fn collect_extenders(skills: &[Skill], box_id: &str) -> Vec<Skill> {
-    skills
+/// The objectives that extend `box_id` directly.
+fn collect_extenders(objectives: &[Objective], box_id: &str) -> Vec<Objective> {
+    objectives
         .iter()
-        .filter(|s| s.box_id != box_id && s.extended_skill_box_ids.iter().any(|e| e == box_id))
+        .filter(|s| s.box_id != box_id && s.extended_objective_box_ids.iter().any(|e| e == box_id))
         .cloned()
         .collect()
 }
 
-/// The coverages and benchmarks of a skill with what it inherits: its own first, then those of
-/// each skill it extends (resolved the same way), once per box. An inherited entry says whose
-/// it is. A skill that is already being resolved (a cycle) gives only what it has itself.
+/// The coverages and benchmarks of an objective with what it inherits: its own first, then those of
+/// each objective it extends (resolved the same way), once per box. An inherited entry says whose
+/// it is. An objective that is already being resolved (a cycle) gives only what it has itself.
 fn resolve(
     id: &str,
     pool: &std::collections::HashMap<String, Own>,
