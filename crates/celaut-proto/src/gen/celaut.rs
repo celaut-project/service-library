@@ -87,25 +87,14 @@ pub struct Uint64KeyValue {
 /// its rules. The protocol gives the kind of payment contract on that ledger. The xattrs
 /// give the values of this contract.
 ///
-/// Keys of xattrs:
-/// "script": the script bytes that receive the payment (on Ergo, the propositionBytes;
-/// on Bitcoin, the scriptPubKey). On a reputation proof, the ErgoTree of the reputation
-/// contract.
-/// "address": the address of the wallet on the ledger, as text, for a person. Senders do
-/// not set it now. A reader uses it only if there is no script.
-/// "token_id": the asset: the name of the native asset (for example "ERG" or "BTC"), or
-/// the id of the token. On a reputation proof, the token id of the proof.
-/// "owner_public_key" and "owner_signature": on a reputation proof only, the owner
-/// attestation. The public key is the key that published the proof, in the encoding
-/// that the ledger declaration gives. The signature is by that key, on a text that
-/// contains the id of the peer that announces the proof. The ledger declaration gives
-/// the text. The attestation proves only that the owner of the key accepts this peer as
-/// the holder of the proof. If the attestation is missing or does not verify, the
-/// reader does not credit the proof to the peer.
-///
 /// The formal field of the protocol of a payment contract defines the keys of xattrs of
 /// that contract: what they mean, how they are encoded and which of them are required.
-/// A reputation proof has no protocol. Its ledger declaration defines its keys.
+/// A reputation proof has no protocol. The formal field of its ledger defines its keys.
+/// They include the owner attestation: the key that published the proof, and its
+/// signature on a text that contains the id of the peer that announces the proof. The
+/// attestation proves only that the owner of the key accepts this peer as the holder of
+/// the proof. If the attestation is missing or does not verify, the reader does not
+/// credit the proof to the peer.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Contract {
     /// The ledger of the contract.
@@ -114,7 +103,8 @@ pub struct Contract {
     /// The payment protocol of the contract.
     #[prost(message, optional, tag = "2")]
     pub protocol: ::core::option::Option<contract::Protocol>,
-    /// The values that are specific to the ledger. See the keys above.
+    /// The values of this contract. The formal field of the protocol defines the keys. On
+    /// a reputation proof, the formal field of the ledger defines them.
     #[prost(message, repeated, tag = "3")]
     pub xattrs: ::prost::alloc::vec::Vec<BytesKeyValue>,
 }
@@ -314,11 +304,30 @@ pub mod service {
             /// Only for information: the node does not charge it.
             #[prost(message, repeated, tag = "4")]
             pub mu_per_call: ::prost::alloc::vec::Vec<super::super::AmountKeyValue>,
-            /// The settings of the slot: how a third party reaches it, and if a tunnel
-            /// connection wakes a hibernated instance. A node that does not know a
-            /// setting, or does not understand its value, does not run the service. See
-            /// Policy and docs/policies/. Nodes older than this field ignore it. In
-            /// ConfigurationFile.gateway the node ignores these settings.
+            /// The settings of the slot. A node that does not know a setting, or does
+            /// not understand its value, does not run the service. Nodes older than this
+            /// field ignore it. In ConfigurationFile.gateway the node ignores these
+            /// settings. The value of each setting is one word in UTF-8. A slot that does
+            /// not set a setting has the default of that setting. These settings are
+            /// valid here:
+            ///    * access: how a third party reaches the slot. "any" (the default),
+            ///      "direct" or "tunnel". The node enforces it only in ServiceTunnel. A
+            ///      direct connection does not go through the node, so for a direct
+            ///      connection "tunnel" is only a declaration for callers. Its formal is
+            ///      the lines "default=any", "place=api.slot", "setting=access" and
+            ///      "values=any,direct,tunnel", in this sequence, joined by a newline.
+            ///    * tunnel_auth: how ServiceTunnel finds the instance. "token" (the
+            ///      default): the caller sends the instance token. "address": the caller
+            ///      sends the Instance.Uri that the node published for the slot, and no
+            ///      token. Its formal is the lines "default=token", "place=api.slot",
+            ///      "setting=tunnel_auth" and "values=address,token", in this sequence,
+            ///      joined by a newline.
+            ///    * wake: "never" (the default) or "on_tunnel". With "on_tunnel", a
+            ///      ServiceTunnel connection wakes a hibernated instance. Its formal is the
+            ///      lines "default=never", "place=api.slot", "setting=wake" and
+            ///      "values=never,on_tunnel", in this sequence, joined by a newline.
+            /// A node refuses a service that has wake=on_tunnel or tunnel_auth=address on
+            /// a slot with access=direct. See Policy.
             #[prost(message, repeated, tag = "5")]
             pub policies: ::prost::alloc::vec::Vec<super::super::Policy>,
         }
@@ -438,12 +447,33 @@ pub mod service {
             #[prost(message, repeated, tag = "1")]
             pub branch: ::prost::alloc::vec::Vec<filesystem::ItemBranch>,
             /// Settings of the whole tree. Only on the root Filesystem (the one that
-            /// Container.filesystem holds): a subdirectory has none. The setting
-            /// "read_mode" is valid here: "rw" (the default) or "ro". With "ro", the
-            /// service can write only in /tmp and /run. Every entry must then have all
-            /// the metadata keys. The node can then make a compressed image and mount it
-            /// read-only. A node that does not know a policy does not run the service.
-            /// See Policy.
+            /// Container.filesystem holds): a subdirectory has none. A node that does
+            /// not know a policy does not run the service. See Policy.
+            /// read_mode: "rw" (the default) or "ro". With "ro", the service can write
+            /// only in /tmp and /run. The setting entry_metadata must be present, and
+            /// every entry must have all its keys. The node can then make a compressed
+            /// image and mount it read-only. Its formal is the lines "default=rw",
+            /// "place=filesystem.root", "setting=read_mode" and "values=ro,rw", in this
+            /// sequence, joined by a newline.
+            /// entry_metadata: the entries carry metadata in ItemBranch.xattrs. Its
+            /// value is empty. The keys are:
+            ///    * mode: the file type and the permission bits, as in st_mode.
+            ///    * uid: the user id of the owner.
+            ///    * gid: the group id of the owner.
+            ///    * mtime_ns: the modification time in nanoseconds. It is 0 on a
+            ///      symbolic link.
+            ///    * device.major, device.minor: the numbers of a block or character
+            ///      device entry. They are 0 on any other entry.
+            ///    * device.is_block: 1 for a block device, 0 for any other entry.
+            /// The values are base-10 integers as UTF-8 text. An entry has all the keys
+            /// or none. An entry with no keys gets the default of the node. A node
+            /// ignores other keys. A node that finds one of the keys without this
+            /// setting does not run the service. Its formal is the lines
+            /// "encoding=base-10 integers as UTF-8 text", "entry=all keys or none",
+            /// "keys=device.is_block,device.major,device.minor,gid,mode,mtime_ns,uid",
+            /// "nondevice=device.is_block, device.major and device.minor are 0",
+            /// "place=filesystem.root" and "setting=entry_metadata", in this sequence,
+            /// joined by a newline.
             #[prost(message, repeated, tag = "2")]
             pub policies: ::prost::alloc::vec::Vec<super::super::Policy>,
         }
@@ -455,16 +485,36 @@ pub mod service {
                 /// The name of the file, the link or the directory.
                 #[prost(string, tag = "1")]
                 pub name: ::prost::alloc::string::String,
-                /// Attributes of the entry, as in a tar archive. Every entry has all or
-                /// none of these keys: "mode", "uid", "gid", "mtime_ns", "device.major",
-                /// "device.minor", "device.is_block". Their values are base-10 integers as
-                /// UTF-8 text. On an entry that is not a device, the three device keys are
-                /// "0". A node reads no setting from here and ignores other keys.
+                /// The values of the entry. The setting "entry_metadata" of the root
+                /// Filesystem defines the keys. Without that setting, a node reads
+                /// nothing from here.
                 #[prost(message, repeated, tag = "5")]
                 pub xattrs: ::prost::alloc::vec::Vec<super::super::super::BytesKeyValue>,
-                /// Settings of the entry. Only these places are valid: the setting
-                /// "share" on a directory. A node that does not know a policy does not
-                /// run the service. See Policy.
+                /// Settings of the entry. Only the setting "share" is valid here, and
+                /// only on a directory. A node that does not know a policy does not run
+                /// the service. See Policy.
+                /// share: the directory is shared with other instances. Its value is
+                /// key=value lines in UTF-8, sorted by key and joined by a newline, with
+                /// no empty key and no repeated key. The keys are:
+                ///    * role (required): "shared": the instance exports the directory to
+                ///      the children that it starts. "guest": the instance receives the
+                ///      directory from the parent that started it. If no parent exported
+                ///      the directory to this instance, the node does not start it.
+                ///      "network": the instance shares the directory with the members of
+                ///      the network that the key network gives.
+                ///    * access: the mount mode, "rw" (the default) or "ro".
+                ///    * tag: the name of the share, in place of the path. It matches
+                ///      another tag only if the two have the same bytes. The characters
+                ///      are [A-Za-z0-9][A-Za-z0-9._@:+-]*.
+                ///    * env: the name of an environment variable of the Configuration, as
+                ///      a POSIX variable name. The value of the variable selects the share.
+                ///    * network: the tag of the network. Only with role=network.
+                /// Another key makes the value not valid. A share cannot be in the tree
+                /// of another share. Two shares of one role cannot have the same tag. Its
+                /// formal is the lines "access.default=rw",
+                /// "keys=access,env,network,role,tag", "place=filesystem.directory",
+                /// "role.values=guest,network,shared" and "setting=share", in this
+                /// sequence, joined by a newline.
                 #[prost(message, repeated, tag = "6")]
                 pub policies: ::prost::alloc::vec::Vec<super::super::super::Policy>,
                 #[prost(oneof = "item_branch::Item", tags = "2, 3, 4")]
@@ -1503,13 +1553,16 @@ pub struct Peer {
     /// "ram_mu_per_gib_second:<architecture>"), "cpu_mu_per_vcpu_second",
     /// "disk_mu_per_gib_second", "net_mu_per_gib", "build_mu", "tunnel_open_mu",
     /// "modify_resources_mu", "statement_query_mu", "statement_row_mu",
-    /// "scarcity_max_multiplier". The values of the "_mu" keys
-    /// are in MU. Each RAM, CPU and disk rate is a base price. When a resource is scarce,
+    /// "scarcity_max_multiplier". The keys "net_mu_per_gib" and "connection_open_mu" (one
+    /// connection) can also have the form "<key>:<network>", with the network as in
+    /// limits (a DNS host name in lowercase, or "*"): the price for the instances that reach that network, in place of the
+    /// general rate of the same name. A network without such a key has the general rate.
+    /// The values of the "_mu" keys are in MU. Each RAM, CPU and disk rate is a base price. When a resource is scarce,
     /// the node multiplies its rate by a factor from 1 to scarcity_max_multiplier. The
     /// other rates do not change. scarcity_max_multiplier has no unit. The node does not
     /// send a rate of 0. A reader ignores a key that it does not know.
     #[prost(message, repeated, tag = "4")]
-    pub mu_per_call: ::prost::alloc::vec::Vec<AmountKeyValue>,
+    pub rates: ::prost::alloc::vec::Vec<AmountKeyValue>,
     /// The public key of the identity of the node, in the encoding that
     /// signature_scheme gives, as 64 lowercase hexadecimal characters. It is the id of
     /// the peer. A reader refuses a key with uppercase characters or spaces.
@@ -1559,6 +1612,23 @@ pub struct Peer {
     /// architecture.
     #[prost(message, repeated, tag = "10")]
     pub devices: ::prost::alloc::vec::Vec<Device>,
+    /// The limits of the node, as keys with a number. A key has the form
+    /// "<limit>:<network>". The network is a DNS host name in lowercase, as a tag of
+    /// Service.Network. Only these networks have keys: a pow: network is a set of peers
+    /// and uses no access of this node to a third party. A reader splits the key at the
+    /// first ":". The tag "*" is every network that has no key of its own. The limits
+    /// are for one client (the caller that pays for the instance). With the prefix
+    /// "global_" the limit is for all the clients together: when it is full, the node
+    /// refuses a new connection even if the client is within its own limits. Limits:
+    /// "max_concurrent_connections", "max_connections_per_day",
+    /// "max_connections_per_month", "max_gib_per_day" and "max_gib_per_month". A day and
+    /// a month are the calendar days and months in UTC. The node gives a limit because
+    /// its access to a network is a limited supply. The price of the same network is in
+    /// rates. A limit that is absent is not a promise of no limit. It is an offer: the
+    /// quote (EstimatedCost) is the authority for one instance, and the node refuses an
+    /// instance that goes beyond a limit. A reader ignores a key that it does not know.
+    #[prost(message, repeated, tag = "11")]
+    pub limits: ::prost::alloc::vec::Vec<Uint64KeyValue>,
     /// The unix time of the announcement, in seconds. A reader accepts a Peer only if its
     /// ts is more than the ts of the last Peer that it accepted for the same public_key.
     #[prost(int64, tag = "99")]

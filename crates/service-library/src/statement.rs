@@ -190,10 +190,10 @@ pub struct Rates {
     pub row_mu: u128,
 }
 
-/// One rate that the `Peer` advertises in `mu_per_call`, in MU. `None` if it advertises
+/// One rate that the `Peer` advertises in `rates`, in MU. `None` if it advertises
 /// it not at all, or not as a decimal integer: then the cost is not known.
 pub fn peer_rate(peer: &Peer, key: &str) -> Option<u128> {
-    let entry = peer.mu_per_call.iter().find(|e| e.key == key)?;
+    let entry = peer.rates.iter().find(|e| e.key == key)?;
     let n = &entry.value.as_ref()?.n;
     if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -202,7 +202,7 @@ pub fn peer_rate(peer: &Peer, key: &str) -> Option<u128> {
 }
 
 impl Rates {
-    /// The rates that the `Peer` advertises in `mu_per_call`. `None` if it advertises
+    /// The rates that the `Peer` advertises in `rates`. `None` if it advertises
     /// one of them not at all, or not as a decimal integer: then the cost is not known
     /// the cost and must not read.
     pub fn from_peer(peer: &Peer) -> Option<Rates> {

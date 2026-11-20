@@ -557,7 +557,7 @@ fn a_head_only_read_checks_the_genesis_of_an_empty_account() {
 
 fn peer(entries: &[(&str, &str)]) -> Peer {
     Peer {
-        mu_per_call: entries
+        rates: entries
             .iter()
             .map(|(k, v)| AmountKeyValue {
                 key: (*k).into(),

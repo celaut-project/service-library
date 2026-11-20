@@ -177,7 +177,7 @@ impl Fake {
         };
         Peer {
             public_key: self.key.lock().unwrap().clone(),
-            mu_per_call: if self.rates {
+            rates: if self.rates {
                 vec![
                     rate("statement_query_mu", "100"),
                     rate("statement_row_mu", "1"),

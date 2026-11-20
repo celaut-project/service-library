@@ -139,7 +139,7 @@ impl tonic::server::StreamingService<Buffer> for Method {
                     };
                     Peer {
                         public_key: PEER_ID.into(),
-                        mu_per_call: vec![
+                        rates: vec![
                             rate("statement_query_mu", "100"),
                             rate("statement_row_mu", "1"),
                         ],
