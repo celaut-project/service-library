@@ -1271,7 +1271,7 @@ pub struct BalanceStatement {
     pub signature: ::prost::alloc::string::String,
     /// True when the node that signs did not write the movements. It read the statement
     /// of a descendant from the next node, checked the signature of that node, and
-    /// signs it again for its own caller. The digest covers it only when it is true.
+    /// signs it again for its own caller. The digest always covers it, as 1 or 0.
     #[prost(bool, tag = "3")]
     pub relayed: bool,
     /// Which account.
@@ -1283,8 +1283,8 @@ pub struct BalanceStatement {
     /// In the answer to a read with instance_ref: the service of the instance that the
     /// statement is about, as the lowercase hexadecimal of its content hash. The caller
     /// can then know which service each descendant runs. Empty when the node does not
-    /// know it, and in the answer to a read without instance_ref. The digest covers it
-    /// only when it is not empty.
+    /// know it, and in the answer to a read without instance_ref. The digest always covers
+    /// it. When it is empty, its place in the digest is empty.
     #[prost(string, tag = "5")]
     pub service_id: ::prost::alloc::string::String,
     /// In the answer to a read with instance_ref: the instance_ref of the request. The
@@ -1292,7 +1292,8 @@ pub struct BalanceStatement {
     /// later that the statement was of another account. A reader refuses an answer to a
     /// read with instance_ref that does not have the same instance_ref. A node that
     /// relays sets the instance_ref that its own caller asked for. Empty in the answer to
-    /// a read without instance_ref. The digest covers it only when it is not empty.
+    /// a read without instance_ref. The digest always covers it. When it is empty, its place
+    /// in the digest is empty.
     #[prost(string, tag = "6")]
     pub instance_ref: ::prost::alloc::string::String,
     /// The range that the request asked for.
