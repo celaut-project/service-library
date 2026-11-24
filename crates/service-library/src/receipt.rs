@@ -86,12 +86,12 @@ pub fn blake2b_256_hex(data: &[u8]) -> String {
 }
 
 /// The lowercase hex of the UTF-8 of `text`; empty for an empty text.
-fn hex_text(text: &str) -> String {
+pub(crate) fn hex_text(text: &str) -> String {
     hex::encode(text.as_bytes())
 }
 
 /// Lowercase hex, an even number of digits, and `len` digits if given.
-fn is_hex(value: &str, len: Option<usize>) -> bool {
+pub(crate) fn is_hex(value: &str, len: Option<usize>) -> bool {
     len.is_none_or(|n| value.len() == n)
         && value.len().is_multiple_of(2)
         && value
@@ -114,6 +114,22 @@ pub fn normalize_key(text: &str) -> Option<String> {
 pub fn execution_name(token: &str, peer_id: &str) -> Option<String> {
     let key = hex::decode(normalize_key(peer_id)?).ok()?;
     let mut data = token.as_bytes().to_vec();
+    data.extend_from_slice(&key);
+    Some(blake2b_256_hex(&data))
+}
+
+/// The prefix of the name of an execution that is named by an `instance_ref`
+/// (`execution_receipt.EXECUTION_REF_PREFIX`).
+pub const EXECUTION_REF_PREFIX: &str = "celaut-execution-ref:";
+
+/// `blake2b_256("celaut-execution-ref:" + instance_ref || the 32 bytes of the key)`, lowercase
+/// hex: the name of an execution in the receipts of a `DescendantTunnel` (nodo#631). The caller
+/// holds the token of an ancestor and the `instance_ref` of the descendant, never the token of
+/// the descendant, so the name comes from the `instance_ref`. The prefix keeps it apart from
+/// the name of a token. `None` if `peer_id` is not a key.
+pub fn execution_name_by_ref(instance_ref: &str, peer_id: &str) -> Option<String> {
+    let key = hex::decode(normalize_key(peer_id)?).ok()?;
+    let mut data = format!("{EXECUTION_REF_PREFIX}{instance_ref}").into_bytes();
     data.extend_from_slice(&key);
     Some(blake2b_256_hex(&data))
 }
@@ -288,7 +304,7 @@ pub fn receipt_scheme() -> SignatureScheme {
 
 /// One component that names the Ed25519 component of nodo (`same_component`): the
 /// `formal` decides if it has one, else the tag `ed25519`.
-fn scheme_is_ours(scheme: Option<&SignatureScheme>) -> bool {
+pub(crate) fn scheme_is_ours(scheme: Option<&SignatureScheme>) -> bool {
     let Some(scheme) = scheme else {
         return false;
     };
@@ -302,21 +318,22 @@ fn scheme_is_ours(scheme: Option<&SignatureScheme>) -> bool {
 }
 
 /// The text that [`receipt_digest`] hashes: every field but `envs_salt` and
-/// `signature`, in field order, joined by `|`:
+/// `signature`, in the order of the numbers of the fields in `celaut.proto`, joined by `|`
+/// (`execution_receipt.canonical_receipt` of nodo):
 ///
 /// ```text
-/// hex(kind) | peer_id | execution_name | ts
+/// hex(kind) | peer_id | blake2b_256(UTF-8(canonical_scheme(signature_scheme))) | ts
+/// | execution_name
 /// | hex(service_id.type) ~ hex(service_id.value) | envs_digest | hex(initial_mu.n)
+/// | cpu_period | cpu_quota | mem_limit | disk_space | kernel | hex(device)/hex(device)...
 /// | hex(plane) | session | hex(slot) | seq
 /// | in_events | in_bytes | in_head | out_events | out_bytes | out_head
 /// | hex(mu_charged.n) | hex(coverage) | hex(capture_mode) | hex(degraded_reason)
-/// | cpu_period | cpu_quota | mem_limit | disk_space | kernel | hex(device)/hex(device)...
-/// | blake2b_256_hex(UTF-8(canonical_scheme(signature_scheme)))
 /// ```
 ///
 /// The five numbers and the kernel are what a `start` receipt says that the node
-/// reserved (nodo commit 425ba843); they are `0` or empty in the other kinds. `devices`
-/// is sorted ([`problems`] refuses another order), each chip in hex, joined by `/`.
+/// reserved; they are `0` or empty in the other kinds. `devices` is sorted ([`problems`]
+/// refuses another order), each chip in hex, joined by `/`.
 pub fn canonical_receipt(r: &ExecutionReceipt) -> String {
     let (service_type, service_value) = r
         .service_id
@@ -334,11 +351,22 @@ pub fn canonical_receipt(r: &ExecutionReceipt) -> String {
     [
         hex_text(&r.kind),
         r.peer_id.clone(),
-        r.execution_name.clone(),
+        blake2b_256_hex(scheme.as_bytes()),
         r.ts.to_string(),
+        r.execution_name.clone(),
         format!("{service_type}~{service_value}"),
         r.envs_digest.clone(),
         amount(&r.initial_mu),
+        r.cpu_period.to_string(),
+        r.cpu_quota.to_string(),
+        r.mem_limit.to_string(),
+        r.disk_space.to_string(),
+        r.kernel.clone(),
+        r.devices
+            .iter()
+            .map(|d| hex_text(d))
+            .collect::<Vec<_>>()
+            .join("/"),
         hex_text(&r.plane),
         r.session.clone(),
         hex_text(&r.slot),
@@ -353,17 +381,6 @@ pub fn canonical_receipt(r: &ExecutionReceipt) -> String {
         hex_text(&r.coverage),
         hex_text(&r.capture_mode),
         hex_text(&r.degraded_reason),
-        r.cpu_period.to_string(),
-        r.cpu_quota.to_string(),
-        r.mem_limit.to_string(),
-        r.disk_space.to_string(),
-        r.kernel.clone(),
-        r.devices
-            .iter()
-            .map(|d| hex_text(d))
-            .collect::<Vec<_>>()
-            .join("/"),
-        blake2b_256_hex(scheme.as_bytes()),
     ]
     .join("|")
 }
@@ -926,35 +943,37 @@ mod tests {
     const START_CANONICAL: &str = concat!(
         "7374617274",
         "|03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
-        "|b08b762433f9c582f3347fbe192e523260278d24533a94e1972fbcddba42158a",
+        "|94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
         "|1798329600",
+        "|b08b762433f9c582f3347fbe192e523260278d24533a94e1972fbcddba42158a",
         "|a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
         "~63e5b5a4137cfa77cb9d10adae081d0df082a826d8441721460d5933f5800056",
         "|e684ff3022c2a14c62addd0129cd4a5d3dc95b2d13a924ce4fc57aa7e9842a45",
         "|3132333435363738",
-        "||||0|0|0||0|0||||||",
-        "0|0|0|0|||",
-        "94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
+        "|0|0|0|0||",
+        "||||0|0|0||0|0|||||",
     );
-    const START_DIGEST: &str = "aca2b1b82e63e56dbde1a11d1720eac825ca5f9ebe4212ec3a7e9530e11e482f";
+    const START_DIGEST: &str = "8cf6c9e0df9a9d82c53fd4c14f4815f3cd35bb19d33706c19309dd17d8b05c1b";
     const START_SIGNATURE: &str = concat!(
-        "ba72e35cc326195330929376de641970bd4bfb9c097d60498bffa174939a91ed",
-        "1d13a6f59adb474bc4943fd4573479c1322d77ea399104b5bc9814289b3d390d",
+        "a5390f4fe0b48312e6749803f035d212d21718624511623d6baae0f834bbf57d",
+        "26173e0f584e4c72d9815f392168147a7db59d1cd98034a7952d6a3edf398d0a",
     );
     const IN_HEAD: &str = "4cc36e6c5ce771828a06755610180b0db14686b7b88ec9aca2d94dc67cb82b58";
     const OUT_HEAD: &str = "721ba2dbda02e1f8d3f9bf151175163f77ece18af91d85a2357a438d36f2ed85";
     const CHECKPOINT_DIGEST: &str =
-        "9b70d9fc991f69e5cc3a06e39d860ad00abefc55bba3e42f4b5e08a621f5f0a4";
+        "92b549c868ba4d005ed20f2937c162312016011e95153bde859af659aaec1257";
     const CHECKPOINT_SIGNATURE: &str = concat!(
-        "3bc5472ebb40bbb1d1aef20d811a481873b9828c517c07040189f7237ed90176",
-        "c646748d6a82f8274e37560ed9ff30f7280ec82ea50d60630cc022e8de35ad03",
+        "ff4b2145b7a18adc3add1ecee1d52bb6b0cc9ef157e289b4d861afc91c56a671",
+        "9e9e31ae09980af879a0ce9613cb8e46faa7f5414d1b214e7f3b750c9167790c",
     );
     const CHECKPOINT_CANONICAL: &str = concat!(
         "636865636b706f696e74",
         "|03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
-        "|b08b762433f9c582f3347fbe192e523260278d24533a94e1972fbcddba42158a",
+        "|94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
         "|1798329600",
+        "|b08b762433f9c582f3347fbe192e523260278d24533a94e1972fbcddba42158a",
         "|~||",
+        "|0|0|0|0||",
         "|74756e6e656c",
         "|00112233445566778899aabbccddeeff",
         "|38303830",
@@ -964,8 +983,6 @@ mod tests {
         "|37",
         "|636c69656e742d74756e6e656c",
         "||",
-        "|0|0|0|0||",
-        "|94c3da627446ed1f3c3736d21ded39451ec00c4ccc687acc42b9d0c61dfcf573",
     );
 
     fn envs() -> BTreeMap<String, Vec<u8>> {
@@ -1711,15 +1728,18 @@ mod node_vectors {
     }
 
     #[test]
-    fn the_new_fields_go_after_degraded_reason_and_before_the_scheme() {
+    fn the_reserved_fields_go_after_the_amount_and_the_scheme_digest_goes_third() {
         let mut r = reserved_start();
         r.degraded_reason = "x".into();
         let text = canonical_receipt(&r);
         let parts: Vec<&str> = text.split('|').collect();
         assert_eq!(parts.len(), 28);
-        assert_eq!(parts[20], "78");
         assert_eq!(
-            parts[21..27],
+            parts[2],
+            blake2b_256_hex(canonical_scheme(&receipt_scheme()).as_bytes())
+        );
+        assert_eq!(
+            parts[8..14],
             [
                 "100000",
                 "200000",
@@ -1729,10 +1749,7 @@ mod node_vectors {
                 "313064653a31616430/313064653a32323034"
             ]
         );
-        assert_eq!(
-            parts[27],
-            blake2b_256_hex(canonical_scheme(&receipt_scheme()).as_bytes())
-        );
+        assert_eq!(parts[27], "78");
     }
 
     #[test]

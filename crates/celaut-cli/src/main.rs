@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use celaut_proto::celaut::observe_event;
-use celaut_proto::celaut::{Amount, BytesKeyValue, Configuration, ServiceInstance as Started};
+use celaut_proto::celaut::{
+    Amount, BytesKeyValue, Configuration, EstimatedCost, ServiceInstance as Started,
+};
 use prost::Message;
 use serde_json::{json, Value};
 use service_library::config::{grpc_uri, NodeConfig, DEFAULT_CONFIG_PATH};
@@ -21,6 +23,7 @@ use service_library::network;
 use service_library::notice;
 use service_library::objectives::Objectives;
 use service_library::observe::ObserveOptions;
+use service_library::offer::{self, CheckedOffer, OfferFault};
 use service_library::package::{self, PackageInfo};
 use service_library::packer::Packer;
 use service_library::resources::Resizer;
@@ -39,8 +42,16 @@ Usage: celaut [GLOBAL] <command> [ARGS]
 Commands:
   config                       the gateway, the memory limit and the networks
   inspect <file.bee>           the service id of a package
-  cost      DEP                the estimated cost of a start
-  acquire   DEP [--new]        an idle instance of DEP, or a new one: {lease, uri}
+  cost      DEP                the estimated cost of a start, and its signed offer: {cost_mu, ...,
+                               offer: {promise, valid_until, usable, fault, hex, ...}}
+  acquire   DEP [--new] [--use-offer | --offer HEX|@FILE]
+                               an idle instance of DEP, or a new one: {lease, uri}. With
+                               --use-offer the start carries the signed offer that the node
+                               just gave (Configuration.offer): the node keeps its price until
+                               valid_until. --offer sends an EstimatedCost that you kept (hex of
+                               its protobuf, or @file). The signature and valid_until are
+                               checked first, as the node checks them, and an offer that the
+                               node would ignore is an error (exit 1)
   release   <lease> [--outcome success|timeout|failure]
                                give the instance back to the pool
   stop      <lease>            stop the instance now: {refund_mu}
@@ -129,6 +140,7 @@ const SWITCHES: &[&str] = &[
     "no-inherit",
     "require-receipt",
     "no-receipt-check",
+    "use-offer",
     "help",
 ];
 
@@ -252,8 +264,13 @@ impl Dep {
         hex::encode(self.id)
     }
 
+    /// The key of the pool: what the instance was started with. The offer is not in it: it
+    /// is the price of one start and changes at each one, and it does not change the
+    /// instance that the pool holds.
     fn configuration_key(&self) -> String {
-        hex::encode(self.configuration.encode_to_vec())
+        let mut configuration = self.configuration.clone();
+        configuration.offer = None;
+        hex::encode(configuration.encode_to_vec())
     }
 }
 
@@ -295,6 +312,7 @@ fn configuration(args: &Args) -> Res<Configuration> {
     Ok(Configuration {
         environment_variables: env,
         initial_mu,
+        offer: None,
     })
 }
 
@@ -553,6 +571,93 @@ fn members(instances: &[celaut_proto::celaut::Instance]) -> Vec<Value> {
         .collect()
 }
 
+/// What a caller can say of the offer that the node gave, as JSON.
+fn offer_json(checked: &CheckedOffer) -> Value {
+    let cost = &checked.cost;
+    let load: serde_json::Map<String, Value> = offer::scarcity_of(cost)
+        .into_iter()
+        .map(|(k, v)| (k, json!(v)))
+        .collect();
+    let mut answer = json!({
+        "promise": cost.valid_until > 0,
+        "valid_until": cost.valid_until,
+        "signed": !cost.signature.is_empty(),
+        "usable": checked.is_usable(),
+        "fault": checked.verdict.as_ref().err().map(|e| e.to_string()),
+        "launch_scarcity_ppm": load,
+    });
+    if cost.valid_until > 0 {
+        // The bytes of the EstimatedCost, to give back with `acquire --offer`.
+        answer["hex"] = json!(hex::encode(cost.encode_to_vec()));
+    }
+    answer
+}
+
+/// `--offer HEX|@FILE` is an `EstimatedCost` that the caller kept. `--use-offer` asks the
+/// node for one now. Either way the offer goes in `Configuration.offer` of `dep` only if the
+/// node would keep its price: it has a `valid_until` that is not past, and the signature of the
+/// node. An offer that the node would ignore is an error, except a node that makes no promise
+/// (`valid_until` 0) with `--use-offer`, which starts as before. The answer is the `offer` of
+/// the output of `acquire`, or `None` when no flag asks for one.
+async fn attach_offer(args: &Args, gateway: &Gateway, dep: &mut Dep) -> Res<Option<Value>> {
+    let now = pool::now() as i64;
+    if let Some(source) = args.value("offer") {
+        let bytes = match source.strip_prefix('@') {
+            Some(path) => std::fs::read(path)
+                .map_err(|e| Fail::Other(format!("--offer {path}: {e}")))
+                .map(|b| {
+                    // A file may hold the hex too.
+                    match std::str::from_utf8(&b).ok().map(str::trim).map(hex::decode) {
+                        Some(Ok(decoded)) if !decoded.is_empty() => decoded,
+                        _ => b,
+                    }
+                })?,
+            None => hex::decode(source.trim())
+                .map_err(|_| usage("--offer is the hex of an EstimatedCost, or @FILE"))?,
+        };
+        let cost = EstimatedCost::decode(bytes.as_slice())
+            .map_err(|e| usage(format!("--offer is not an EstimatedCost: {e}")))?;
+        let peer_id = match gateway.peer_id() {
+            Some(pinned) => pinned.to_string(),
+            None => gateway.verified_peer_info().await?.public_key,
+        };
+        let checked = CheckedOffer {
+            verdict: offer::check(&cost, &peer_id, now),
+            cost,
+            peer_id,
+        };
+        return finish_offer(checked, dep, false);
+    }
+    if args.has("use-offer") {
+        let checked = gateway
+            .checked_offer(dep.id, dep.configuration.clone(), now)
+            .await?;
+        return finish_offer(checked, dep, true);
+    }
+    Ok(None)
+}
+
+fn finish_offer(
+    checked: CheckedOffer,
+    dep: &mut Dep,
+    tolerate_no_promise: bool,
+) -> Res<Option<Value>> {
+    let mut status = offer_json(&checked);
+    match &checked.verdict {
+        Ok(()) => {
+            dep.configuration = checked.configuration(dep.configuration.clone());
+            status["sent"] = json!(true);
+        }
+        Err(OfferFault::NoPromise) if tolerate_no_promise => status["sent"] = json!(false),
+        Err(fault) => {
+            return Err(Fail::Other(format!(
+                "the offer would be ignored by the node: {fault}"
+            )))
+        }
+    }
+    Ok(Some(status))
+}
+
 fn mu(a: Option<&Amount>) -> Res<String> {
     Ok(amount(a)?.to_string())
 }
@@ -753,20 +858,23 @@ async fn run(args: Args) -> Res<Value> {
         }
         "cost" => {
             let dep = dependency(&args, &[])?;
-            let cost = ctx
+            let now = pool::now() as i64;
+            let checked = ctx
                 .gateway()?
-                .estimated_cost(dep.id, dep.configuration.clone())
+                .checked_offer(dep.id, dep.configuration.clone(), now)
                 .await?;
+            let cost = &checked.cost;
             Ok(json!({
                 "service": dep.hex(),
                 "cost_mu": mu(cost.cost.as_ref())?,
                 "init_maintenance_cost_mu": mu(cost.init_maintenance_cost.as_ref())?,
                 "max_maintenance_cost_mu": mu(cost.max_maintenance_cost.as_ref())?,
+                "offer": offer_json(&checked),
             }))
         }
         "acquire" => {
             let sent = ctx.pool(|p| p.sent.clone())?;
-            let dep = dependency(&args, &sent)?;
+            let mut dep = dependency(&args, &sent)?;
             let (service, key) = (dep.hex(), dep.configuration_key());
             if !args.has("new") {
                 let idle = ctx.pool(|p| {
@@ -780,6 +888,7 @@ async fn run(args: Args) -> Res<Value> {
                 }
             }
             let gateway = ctx.gateway()?;
+            let offer = attach_offer(&args, &gateway, &mut dep).await?;
             let (uri, token) = ctx.launch(&gateway, &dep).await?;
             let lease = ctx.pool(|p| {
                 let id = p.next_id();
@@ -796,7 +905,11 @@ async fn run(args: Args) -> Res<Value> {
                 });
                 id
             })?;
-            Ok(json!({ "lease": lease, "uri": uri, "new": true }))
+            let mut answer = json!({ "lease": lease, "uri": uri, "new": true });
+            if let Some(offer) = offer {
+                answer["offer"] = offer;
+            }
+            Ok(answer)
         }
         "release" => {
             let lease = args.lease()?;

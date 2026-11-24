@@ -47,11 +47,30 @@ fn the_initial_mu_of_a_configuration_is_field_two() {
     let configuration = Configuration {
         environment_variables: Vec::new(),
         initial_mu: Some(Amount { n: "7".into() }),
+        offer: None,
     };
     let bytes = configuration.encode_to_vec();
     // Tag 2, wire type 2: 0x12. The old field 3 was 0x1a. The Amount holds the string "7"
     // as field 1: 0x0a 0x01 0x37.
     assert_eq!(bytes, [0x12, 0x03, 0x0a, 0x01, 0x37]);
+    let back = Configuration::decode(bytes.as_slice()).unwrap();
+    assert_eq!(back, configuration);
+}
+
+#[test]
+fn the_offer_of_a_configuration_is_field_three() {
+    use celaut_proto::celaut::{Configuration, EstimatedCost};
+
+    let configuration = Configuration {
+        offer: Some(EstimatedCost {
+            valid_until: 5,
+            signature: "ab".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = configuration.encode_to_vec();
+    assert_eq!(bytes[0], 0x1a);
     let back = Configuration::decode(bytes.as_slice()).unwrap();
     assert_eq!(back, configuration);
 }

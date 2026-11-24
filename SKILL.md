@@ -64,6 +64,44 @@ back to you when the stop ends, and the signed ledger has it then. A refund of 0
 that nothing came back. A stop that fails on every attempt is an error that says the instance
 may still run: treat it as a leak, not as success.
 
+**The signed offer (`Configuration.offer`).** `GetServiceEstimatedCost` gives an `EstimatedCost`
+that the node signs: `valid_until` (unix seconds), `launch_scarcity` (its load for `cpu`, `mem`
+and `disk`, in parts per million) and `signature`. A node that keeps its offer prices the
+instance at that load until `valid_until`, even if its load moves. To use it, send it back in
+`Configuration.offer` of the start. The node keeps the price only if it signed the offer, the
+time is not past, and the figures are those that it computes for this service and these
+resources; in all other cases it ignores the offer and prices the start now. `Gateway::checked_offer`
+asks for the offer and says, before you start, if the node would keep it (`offer::check`: the
+signature of the node, `valid_until`, and a load for each resource; the last check needs the
+pricing of the node, so it is the node's). `CheckedOffer::configuration(base)` gives `base`
+with the offer when it is usable. A node with `OFFER_VALIDITY_SECONDS` 0 makes no promise
+(`valid_until` 0, no signature): `OfferFault::NoPromise`, and the start is as before. With the
+command: `celaut cost DEP` prints `offer` (`promise`, `valid_until`, `usable`, `fault`,
+`launch_scarcity_ppm` and `hex`), `celaut acquire DEP --use-offer` starts with the offer that the
+node just gave, and `--offer HEX|@FILE` with an `EstimatedCost` that you kept (hex of its
+protobuf). An offer that the node would ignore is an error (exit 1) and starts nothing; with
+`--use-offer`, a node that makes no promise starts normally (`offer.sent` is false). The
+identity that must have signed it is `--peer-id`, or else the key of its signed `Peer`. The
+offer is not part of the key of the pool: an instance started with an offer is reused as any
+other of the same configuration.
+
+**Checking a `Peer`.** `Gateway::verified_peer_info` is `GetPeerInfo` plus `peer::verify`: the
+node signs `<public_key>|<ts>|<content digest>` with the scheme Ed25519, and the digest covers
+the addresses, payment contracts, rates, limits, resources, devices and activity window. It
+refuses a `Peer` with no signature, another scheme, a key that is not 64 lowercase hex digits, or a
+signature that does not verify; a pinned `peer_id` must be the key. `Verifier::connect` refuses
+a `Peer` that carries a signature that fails (`VerifierError::BadPeer`). `reputation::verify`
+checks the off-chain `ReputationProof` of a node (signature over `celaut-reputation-proof:<publisher>|<digest>`,
+with the `pow_nonce` in the digest) and `reputation::pow_bits` its work; whether the faults in
+it are true is the judgement of a node (`FaultEvidence`: `evidence_digest` is the digest that
+the proof covers).
+
+**All the digests follow nodo.** The text of each digest is in the order of the numbers of the
+fields of `celaut.proto`. `tests/node_vectors.rs` checks the statement, receipt, offer, `Peer`
+and `ReputationProof` digests and signatures against vectors that the Python of nodo made; see
+the README. If nodo changes a field or a text, regenerate the vectors and the test shows what
+moved.
+
 **Telling "refused" from "unreachable".** `Error::is_unreachable` is true when the gateway did
 not answer. Do not count it as a fault of the node when you keep a reputation or accuse
 anyone.
@@ -325,11 +363,22 @@ instance may use this call.
   of nodo only. The registry was read once from the public Explorer (7 objectives at the time, under
   the old name; one with 4 coverages and 5 benchmarks), but a service found there was never started.
 - The verifier (`verifier`, `celaut verify`) was tested against an in-process node that signs
-  its own ledgers, and the checks of `statement` against the vectors of chatui, which came from
-  a script that follows nodo and not from a real node. Reading the statement of an instance
+  its own ledgers, and the checks of `statement` against vectors that the Python of nodo made (not
+  against a real node). Reading the statement of an instance
   from inside a real service, and the ancestors that a relay hides (`relayed`), were not tried.
   `celaut verify` keeps no state between runs: each run reads from the first movement, within
   its budget.
+- The offer: the library checks its signature, time and load, but not that its figures are the
+  ones that the node computes for the service (that needs the pricing of the node). The check of
+  the quote in the `start` movement against the offer (`delegate_execution.stricter_quote`) is
+  not done: a service that wants it reads the statement (`celaut account`/`verify`) and compares.
+- `peer::verify` does not keep the last `ts` of a peer (anti-replay) or judge the expiry of the
+  addresses; a `ReputationProof` is checked for its signature and its work, not for the
+  attestation of its `ledger_proofs` or for the faults in it. The invitation (`invite.proto`, a
+  QR code) is not read by the library.
+- The comments of `celaut.proto` say that `service_id`, `instance_ref` and `relayed` of a
+  statement are in the digest only when set; the code of nodo always has them, empty parts in
+  their place, and the library follows the code.
 - Publishing objectives, coverages, benchmarks and results. The MCP server of the registry does
   it (`create_objective` and the others); this library only reads. The extended objectives were
   checked against a fake Explorer and against the JS of the registry, but no objective of the

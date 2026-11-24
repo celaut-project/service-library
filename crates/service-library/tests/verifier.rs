@@ -122,6 +122,8 @@ struct Fake {
     ledger_refund: Mutex<Option<u128>>,
     rates: bool,
     key: Mutex<String>,
+    /// 0: the `Peer` has no signature. 1: it is signed by SEED. 2: signed, then a rate changed.
+    peer_mode: AtomicUsize,
     /// The date of the first movement. The rows keep their date between reads, as a real
     /// ledger does: the hash of a row covers it.
     base_ts: i64,
@@ -138,6 +140,7 @@ impl Fake {
             ledger_refund: Mutex::new(None),
             rates: true,
             key: Mutex::new(PEER_ID.to_string()),
+            peer_mode: AtomicUsize::new(0),
             base_ts: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -175,8 +178,9 @@ impl Fake {
             key: key.into(),
             value: Some(Amount { n: n.into() }),
         };
-        Peer {
+        let mut peer = Peer {
             public_key: self.key.lock().unwrap().clone(),
+            signature_scheme: Some(service_library::receipt::receipt_scheme()),
             rates: if self.rates {
                 vec![
                     rate("statement_query_mu", "100"),
@@ -186,7 +190,15 @@ impl Fake {
                 vec![]
             },
             ..Default::default()
+        };
+        let mode = self.peer_mode.load(Ordering::SeqCst);
+        if mode > 0 {
+            service_library::peer::sign_with_seed(&mut peer, 1_800_000_000, &SEED).unwrap();
         }
+        if mode == 2 {
+            peer.rates[0].value = Some(Amount { n: "1".into() });
+        }
+        peer
     }
 
     fn statement(
@@ -903,6 +915,40 @@ async fn without_a_pinned_identity_it_takes_the_advertised_key_and_says_so() {
     let fake = Fake::new();
     let v = verifier(&fake, 1).await;
     assert!(!v.identity_pinned());
+}
+
+#[tokio::test]
+async fn a_signed_peer_info_is_checked_at_connect() {
+    let fake = Fake::new();
+    fake.peer_mode.store(1, Ordering::SeqCst);
+    let v = Verifier::connect(gateway(&fake).await, VerifierConfig::with_budget(1))
+        .await
+        .unwrap();
+    assert!(!v.identity_pinned());
+    // The same call, strict: it needs a signature that verifies.
+    let peer = gateway(&fake).await.verified_peer_info().await.unwrap();
+    assert_eq!(peer.public_key, PEER_ID);
+}
+
+#[tokio::test]
+async fn a_peer_info_whose_rates_were_changed_after_the_signature_is_refused() {
+    let fake = Fake::new();
+    fake.peer_mode.store(2, Ordering::SeqCst);
+    let error = Verifier::connect(gateway(&fake).await, VerifierConfig::with_budget(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VerifierError::BadPeer(_)), "{error}");
+    assert!(gateway(&fake).await.verified_peer_info().await.is_err());
+}
+
+#[tokio::test]
+async fn an_unsigned_peer_info_is_not_verified_by_the_strict_call() {
+    let fake = Fake::new();
+    assert!(gateway(&fake).await.verified_peer_info().await.is_err());
+    let pinned = gateway(&fake).await.with_peer_id("aa".repeat(32));
+    fake.peer_mode.store(1, Ordering::SeqCst);
+    // Signed, but not by the pinned key.
+    assert!(pinned.verified_peer_info().await.is_err());
 }
 
 #[tokio::test]

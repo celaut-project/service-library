@@ -135,9 +135,60 @@ impl Gateway {
         find(&answer, "EstimatedCost")
     }
 
+    /// `GetServiceEstimatedCost`, and the check of the offer in it: the `EstimatedCost`, and
+    /// whether the node would keep its price for a start at `now` (unix seconds). The offer
+    /// is signed by the node with a `valid_until`; the caller sends it back in
+    /// `Configuration.offer` ([`crate::offer::CheckedOffer::configuration`]) and the node
+    /// prices the instance at the load of the offer. An offer that is not usable
+    /// ([`crate::offer::OfferFault`]) is returned all the same, with its verdict: the node
+    /// would ignore it and price the start at its price of now.
+    ///
+    /// The identity that must have signed it is the `peer_id` that the gateway pins
+    /// ([`Gateway::with_peer_id`]); with none, the key of the signed `Peer` of the node
+    /// ([`Gateway::verified_peer_info`]).
+    pub async fn checked_offer(
+        &self,
+        service_hash: [u8; 32],
+        configuration: Configuration,
+        now: i64,
+    ) -> Result<crate::offer::CheckedOffer, Error> {
+        let cost = self.estimated_cost(service_hash, configuration).await?;
+        // An offer with no promise needs no identity: nobody signed it.
+        let peer_id = if cost.valid_until <= 0 {
+            String::new()
+        } else {
+            match &self.peer_id {
+                Some(pinned) => pinned.clone(),
+                None => self.verified_peer_info().await?.public_key,
+            }
+        };
+        let verdict = crate::offer::check(&cost, &peer_id, now);
+        Ok(crate::offer::CheckedOffer {
+            cost,
+            peer_id,
+            verdict,
+        })
+    }
+
+    /// `GetPeerInfo`, and the check of its signature ([`crate::peer::verify`]): the `Peer`
+    /// is signed with the identity key of the node, so a `Peer` that does not verify is an
+    /// error. If the gateway pins a `peer_id`, the key of the `Peer` must be that one.
+    pub async fn verified_peer_info(&self) -> Result<Peer, Error> {
+        let peer = self.peer_info().await?;
+        crate::peer::verify(&peer)
+            .map_err(|e| Error::Protocol(format!("the peer info of the node: {e}")))?;
+        match &self.peer_id {
+            Some(pinned) if *pinned != peer.public_key => Err(Error::Protocol(format!(
+                "the node advertises the key {}, and the pinned peer_id is {pinned}",
+                peer.public_key
+            ))),
+            _ => Ok(peer),
+        }
+    }
+
     /// `GetPeerInfo`: the identity (`public_key`), the addresses and the rates of the node.
     /// It is free, and the node answers anyone. The `Peer` carries a signature that this
-    /// call does not check: the `public_key` is only what the node says about itself, so to
+    /// call does not check (use [`Gateway::verified_peer_info`] for that): the `public_key` is only what the node says about itself, so to
     /// pin the identity give it to [`Gateway::with_peer_id`].
     pub async fn peer_info(&self) -> Result<Peer, Error> {
         // The call takes a `Client` at index 1 and a service has none: an empty one.
@@ -586,6 +637,23 @@ mod tests {
         let hash = Hash::decode(parts[0].data.as_slice()).unwrap();
         assert_eq!(hash.r#type, SHA3_256_TYPE);
         assert_eq!(hash.value, vec![7; 32]);
+    }
+
+    #[test]
+    fn the_offer_of_a_configuration_goes_to_the_node_in_the_start() {
+        let offer = EstimatedCost {
+            valid_until: 99,
+            signature: "ab".into(),
+            ..Default::default()
+        };
+        let configuration = crate::offer::with_offer(Configuration::default(), offer.clone());
+        let parts = start_parts([1; 32], &configuration);
+        assert_eq!(
+            parts.iter().map(|p| p.index).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        let sent = Configuration::decode(parts[0].data.as_slice()).unwrap();
+        assert_eq!(sent.offer, Some(offer));
     }
 
     #[test]

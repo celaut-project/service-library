@@ -1,8 +1,10 @@
 //! Balance statements with `instance_ref` (nodo#631).
 //!
-//! The vectors are in chatui, `docs/celaut/descendants.md`, section 10. The harness could not run
-//! the Python of nodo, so a script that follows `ledger.py` and `balance_statement.py`
-//! computed them, and nothing here was checked against the output of a real node.
+//! The hashes, the digests and the signature of the fixture below were computed by the Python
+//! of nodo (`ledger.movement_hash`, `statement_signature.statement_digest` and
+//! `node_identity.statement_payload`, with the key `000102..1f`), with the `celaut.proto`
+//! that has the digest in the order of the numbers of the fields. `node_vectors.rs` checks
+//! more statements, from the same code, through the bytes of the protobuf.
 
 use celaut_proto::celaut::{
     Amount, AmountKeyValue, BalanceMovement, BalanceStatement, BalanceStatementRequest, Peer,
@@ -26,13 +28,13 @@ const HASHES: [&str; 4] = [
     "ae6ca76d104952b3005d25afbaa3e6a766b444137185d5786844d4be6cda7b1e",
     "d1826e9d6c4b19f8e535061e7e9f01351adcef405318f212d0dbcc2b7515ebbf",
 ];
-const DIGEST_NONE: &str = "1fe4d386b30d8a32a6728b8e838d0adbaf90c9a83b95543ac6f7b6815591ead4";
-const DIGEST_FULL: &str = "ba57e06097700132860ca253f405a2436a45642bbdae479cff2a8ecf8f258d30";
+const DIGEST_NONE: &str = "b6cb0651bed3d9e471d9d64346279cda0998dfb4cdcc5c0f8e154846c8a5d664";
+const DIGEST_FULL: &str = "9e48c48a03950b171a30940eac8228a391563d5272a756346a57e481f4844ba6";
 const DIGEST_FULL_RELAYED: &str =
-    "2cc1dce4e4304f8902c3a2c03492ce357dcb77be34a184bca665f1dfc1b7f351";
-const DIGEST_RELAYED: &str = "33a235c568d0c346910a0e7044dea9733563e2ce561908eca84e90c3abddb9bb";
+    "b6b240f4aede63ba6ee4db24c118924f6be1a02d0ab7762798c39d20b69bec33";
+const DIGEST_RELAYED: &str = "2e75ca4021c3dec67a117d62611763531a7b15fb96acb07d6326f83a9928f24e";
 const NOW: i64 = 1700001001;
-const SIGNATURE: &str = "a7af781d441f40e2ef248a39958d7bd1c363c934c1dcb254350060a8850c0906c374dfa991e833cf7d44159b1ee7be0c1b982a0291d8bd46779bd68efc77de0d";
+const SIGNATURE: &str = "c20070cdc7e03714d7b8f084a6b4f9ef67095856559cdf2612c059cd88944edd9b5a49adb97a91ad7c2241f184272edcdb316413318dc6b3b471b7495cc4b703";
 
 fn service() -> String {
     "cd".repeat(32)
@@ -295,7 +297,12 @@ fn a_kind_that_is_not_known_is_kept() {
 #[test]
 fn a_bad_signature_is_refused() {
     let mut s = signed(unsigned());
-    s.signature.replace_range(0..1, "b");
+    let first = if s.signature.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    s.signature.replace_range(0..1, first);
     assert!(invalid(statement::verify(&request(), PEER_ID, s, None, NOW)).contains("signature"));
     // No signature.
     let mut s = signed(unsigned());

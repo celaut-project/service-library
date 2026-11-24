@@ -288,6 +288,10 @@ pub enum VerifierError {
     /// The node does not give a `public_key` and none was pinned.
     #[error("the node gave no public key and no peer_id was pinned")]
     NoIdentity,
+    /// The `Peer` of the node carries a signature that does not verify ([`crate::peer::verify`]):
+    /// its rates and its key are not what the node signed.
+    #[error("the signed peer info of the node does not verify: {0}")]
+    BadPeer(crate::peer::PeerFault),
     /// The `peer_id` that the service pinned is not the key that the node advertises.
     #[error("the node advertises the key {advertised}, and the pinned peer_id is {pinned}")]
     IdentityMismatch { pinned: String, advertised: String },
@@ -350,6 +354,12 @@ impl Verifier {
     /// advertise that key; else the verifier takes the key that the node advertises.
     pub async fn connect(gateway: Gateway, config: VerifierConfig) -> Result<Self, VerifierError> {
         let peer = gateway.peer_info().await?;
+        // A node signs its `Peer`: a signature that does not verify is a forgery or a bug, and
+        // the rates and the key in it cannot be trusted. A `Peer` with no signature is read as
+        // before (the key is then only what the node says, unless the service pinned it).
+        if !peer.signature.is_empty() {
+            crate::peer::verify(&peer).map_err(VerifierError::BadPeer)?;
+        }
         let rates = Rates::from_peer(&peer).ok_or(VerifierError::NoRates)?;
         let (peer_id, pinned) = match gateway.peer_id() {
             Some(pinned) => {

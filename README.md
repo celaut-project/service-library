@@ -23,8 +23,10 @@ The library of a Celaut service, in Rust. It is the rewrite of
 | `service-library::objectives` | A reader of the [Celaut Registry](https://github.com/celaut-project/registry) (objectives on Ergo, with the services that cover them and their benchmarks): `load_objectives`, `load_coverages`, `load_benchmarks`, `load_results`, `load_objective_tree`, `service_data`, `service_metadata`. It makes the same queries as the MCP server of the registry, and reads from an Ergo Explorer. `https` needs the feature `tls`. It is read only. The id of the objective type has no default: see [The type ids of the registry](#the-type-ids-of-the-registry). Tested against an in-process Explorer. `celaut objectives`, `objective`, `covering` and `service-info` are the commands. |
 | `service-library::package` | Reads a `.bee` file (`nodo export` or `GetService` layout), says its service id, and gives its Buffers for `StartService`. |
 | `service-library::relay`, `skips`, `counter` | Sends a service to the node with an early answer: a node that has it stops the transfer, and a node that holds some blocks makes the library skip them. Ported from chatui with its tests against an in-process node. |
-| `service-library::statement`, `verifier` | The signed balance statements of nodo (nodo#631), ported from chatui with its vectors: `Gateway::balance_statement` reads the account of an instance or of a descendant, within a budget, and `statement::verify` checks the signature, the hash chain, the head and the balance. `Verifier` is the optional verifier: it reads the instances of the service and their children and grandchildren and reports a stop that the service did not ask for, MU kept, a refund that is not in the ledger, a refused or bad statement. A read costs MU, so it has a budget. `DependencyManager::verify` and `spawn_verifier` run it over the pool. `celaut verify` is the command. |
-| `service-library::receipt` | The check of execution receipts, ported from chatui with the vectors of nodo (`check_start` for the start receipt). |
+| `service-library::statement`, `verifier` | The signed balance statements of nodo (nodo#631), the vectors of the digest come from nodo: `Gateway::balance_statement` reads the account of an instance or of a descendant, within a budget, and `statement::verify` checks the signature, the hash chain, the head and the balance. `Verifier` is the optional verifier: it reads the instances of the service and their children and grandchildren and reports a stop that the service did not ask for, MU kept, a refund that is not in the ledger, a refused or bad statement. A read costs MU, so it has a budget. `DependencyManager::verify` and `spawn_verifier` run it over the pool. `celaut verify` is the command. |
+| `service-library::receipt` | The check of execution receipts (`check_start` for the start receipt), with the digest in the order of the fields of `celaut.proto`, and the names of an execution (`execution_name`, `execution_name_by_ref`). |
+| `service-library::offer`, `Gateway::checked_offer` | The signed price offer of a node (`EstimatedCost` with `valid_until`, `launch_scarcity` and `signature`, nodo#657): `offer_digest`, `signature_verifies`, `check` (signature, time and load, as the node checks them) and `with_offer` (`Configuration.offer`). `celaut cost` shows it and `celaut acquire --use-offer` / `--offer` sends it back so the node keeps its price. |
+| `service-library::peer`, `reputation`, `signing` | The digests and signatures of nodo that a service can meet: the signed `Peer` of `GetPeerInfo` (`peer::verify`, `Gateway::verified_peer_info`; `Verifier::connect` refuses a signature that fails) and the off-chain `ReputationProof` (`reputation::verify`, `pow_bits`, `evidence_digest`). |
 | `crates/celaut-cli` | `celaut`: the library as a command, for a service in any language (see below). |
 | `SKILL.md` | What an AI agent that runs as a service has to know, and what it can leave out. It includes how to pack a service with the packer service (there is no `Pack` call in the gateway). |
 
@@ -54,7 +56,7 @@ celaut shutdown                      # stop every instance, when the service end
 
 The instances live in a pool file (`/tmp/celaut/pool.json`, mode 0600; `--state` or
 `CELAUT_STATE` to move it), so commands reuse them, and their tokens never leave it: the
-service only sees lease numbers. `celaut --help` lists the rest: `cost`, `stop`, `list`,
+service only sees lease numbers. `celaut --help` lists the rest: `cost` (with the signed offer; `acquire --use-offer` or `--offer HEX|@FILE` sends it in `Configuration.offer`), `stop`, `list`,
 `metrics`, `notice` (the notices of the node to this service, one JSON per line; `--shutdown` stops the pool when one comes), `account` (the signed statement of the own account of this service, within a `--budget` of MU), `verify` (the signed statements of the instances and their children, within a `--budget` of MU), `pack`, `objectives`, `objective`, `covering`, `service-info`, `deposit`, `tunnel` (stdin to a port, the answer to stdout), `observe` (JSON
 lines; `data` holds the fields of the event: the session, the packets with their peer, the notices), `resize`, `chat`, `resolve`, `config`, `inspect`. The start receipt is checked unless
 `--no-receipt-check`. The `ResourceManager` is not here: it needs a process that stays, and
@@ -83,6 +85,31 @@ way: `with_benchmark_type_id`, `with_coverage_type_id`, `with_result_type_id`; t
 `CELAUT_BENCHMARK_TYPE_ID`, `CELAUT_COVERAGE_TYPE_ID`, `CELAUT_RESULT_TYPE_ID`; the flags
 `--benchmark-type-id`, `--coverage-type-id`, `--result-type-id`. An id that is not empty must
 have 64 hex characters. If it does not, you get an error (`Error::Config`, exit code 1).
+
+## The digests and signatures are checked against nodo
+
+Every text that a node signs is built field by field (never from the protobuf bytes), so the
+library must write the same text as nodo. `crates/service-library/tests/data/gen_node_vectors.py`
+runs the real functions of nodo (`/path/to/nodo/venv/bin/python`, from the nodo directory) with
+the fixed key `000102..1f` and writes `node_vectors.json` and `node_receipts.json`: each message
+as protobuf bytes, with its digest, signed text and signature. `tests/node_vectors.rs` decodes
+the bytes with the prost types and computes every digest again, and verifies the signatures that
+Python made. A change of a field number or of the order of a text fails there.
+
+| What | In the library | In nodo |
+|---|---|---|
+| Balance statement (digest, signature, movement hash, `account_ref`, `instance_ref`, genesis) | `statement` | `statement_signature`, `ledger` |
+| Execution receipt (digest, signature, `execution_name`, envs digest, hash chains) | `receipt` | `execution_receipt` |
+| Price offer (`EstimatedCost`) | `offer` | `signed_offer` |
+| `Peer` (content digest and signature) | `peer` | `node_identity` |
+| `ReputationProof` (base, `pow_nonce`, signature), `FaultEvidence` digest, `ledger_proofs` pointers | `reputation`, `peer::canonical_contract` | `offchain_proof`, `fault_proofs` |
+| Service id type (SHA3-256) | `gateway::SHA3_256_TYPE` | `hashing` |
+
+To make the vectors again, after a change of nodo:
+
+    cd /path/to/nodo && PYTHONDONTWRITEBYTECODE=1 venv/bin/python \
+        /path/to/service-library/crates/service-library/tests/data/gen_node_vectors.py \
+        /path/to/service-library/crates/service-library/tests/data
 
 ## Not done yet
 

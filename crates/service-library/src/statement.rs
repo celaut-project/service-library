@@ -112,35 +112,30 @@ pub fn movement_hash(m: &BalanceMovement) -> String {
     blake2b_256_hex(text.as_bytes())
 }
 
-/// The digest of a statement: every field but the signature (`statement_digest`).
-/// `service_id`, `instance_ref` and `relayed` are in the text only when they are set, so
-/// the digest of a statement without them does not change.
+/// The digest of a statement: every field but the signature (`statement_digest` of nodo,
+/// `src/identity/statement_signature.py`). The parts are in the order of the numbers of
+/// the fields in `celaut.proto`, joined by `|`: `ts`, `relayed` (1 or 0), `account_ref`,
+/// `hex(service_id)`, `hex(instance_ref)`, `from_seq`, `to_seq`, the hash of each movement
+/// joined by `/`, `hex(balance.n)`, `head_seq`, `head_hash`, `oldest_seq` and
+/// `retention_days`. A part with no value is empty and keeps its place.
 pub fn statement_digest(s: &BalanceStatement) -> String {
     let hashes: Vec<String> = s.movements.iter().map(movement_hash).collect();
-    let mut text = [
+    let text = [
+        s.ts.to_string(),
+        if s.relayed { "1" } else { "0" }.to_string(),
         s.account_ref.clone(),
+        hex_text(&s.service_id),
+        hex_text(&s.instance_ref),
         s.from_seq.to_string(),
         s.to_seq.to_string(),
-        s.ts.to_string(),
-        s.retention_days.to_string(),
-        s.oldest_seq.to_string(),
+        hashes.join("/"),
+        hex_text(amount_text(&s.balance)),
         s.head_seq.to_string(),
         s.head_hash.clone(),
-        hex_text(amount_text(&s.balance)),
-        hashes.join("/"),
+        s.oldest_seq.to_string(),
+        s.retention_days.to_string(),
     ]
     .join("|");
-    if !s.service_id.is_empty() {
-        text.push_str("|service_id:");
-        text.push_str(&hex_text(&s.service_id));
-    }
-    if !s.instance_ref.is_empty() {
-        text.push_str("|instance_ref:");
-        text.push_str(&hex_text(&s.instance_ref));
-    }
-    if s.relayed {
-        text.push_str("|relayed");
-    }
     blake2b_256_hex(text.as_bytes())
 }
 

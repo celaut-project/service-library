@@ -14,8 +14,8 @@ use celaut_proto::celaut::instance::{Uri, UriSlot};
 use celaut_proto::celaut::service::{api::Slot, Api};
 use celaut_proto::celaut::{
     configuration_file::NetworkResolution, service::Network, Amount, AmountKeyValue,
-    BalanceMovement, BalanceStatement, BalanceStatementRequest, ConfigurationFile, Instance,
-    Metrics, Peer, Refund, ServiceInstance, Sysresources,
+    BalanceMovement, BalanceStatement, BalanceStatementRequest, ConfigurationFile, EstimatedCost,
+    Instance, Metrics, Peer, Refund, ServiceInstance, Sysresources, Uint64KeyValue,
 };
 use prost::Message;
 use serde_json::Value;
@@ -34,10 +34,89 @@ const SEED: [u8; 32] = [
 ];
 const PEER_ID: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
 
-#[derive(Default)]
+/// What the mock node does with the price of a start.
+#[derive(Clone, Copy, PartialEq)]
+enum Offers {
+    /// It signs the offer, valid for 60 seconds.
+    Valid,
+    /// It makes no promise: `valid_until` 0, no load and no signature.
+    NoPromise,
+    /// It signs the offer, but its time is past.
+    Expired,
+    /// It names a time with no signature of its own: the time was moved after the signature.
+    Forged,
+}
+
 struct Counts {
     started: AtomicUsize,
     stopped: AtomicUsize,
+    offers: Offers,
+    /// The `Configuration.offer` of each `StartService`, as the node got it.
+    offers_seen: std::sync::Mutex<Vec<Option<EstimatedCost>>>,
+}
+
+impl Default for Counts {
+    fn default() -> Self {
+        Counts {
+            started: AtomicUsize::new(0),
+            stopped: AtomicUsize::new(0),
+            offers: Offers::Valid,
+            offers_seen: Default::default(),
+        }
+    }
+}
+
+static ROW_TS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// The offer of the node, as `generate_estimated_cost` and `signed_offer.seal` make it.
+fn node_offer(mode: Offers) -> EstimatedCost {
+    let mut offer = EstimatedCost {
+        cost: mu(10),
+        init_maintenance_cost: mu(7),
+        max_maintenance_cost: mu(9),
+        maintenance_seconds_loop: 60,
+        price_bounded: true,
+        price_volatility: 0.5,
+        volatility_period_seconds: 3600,
+        ..Default::default()
+    };
+    if mode == Offers::NoPromise {
+        return offer;
+    }
+    offer.launch_scarcity = ["cpu", "mem", "disk"]
+        .iter()
+        .map(|k| Uint64KeyValue {
+            key: (*k).into(),
+            value: Some(250_000),
+        })
+        .collect();
+    let until = if mode == Offers::Expired {
+        unix_now() - 5
+    } else {
+        unix_now() + 60
+    };
+    service_library::offer::seal_with_seed(&mut offer, until, &SEED).unwrap();
+    if mode == Offers::Forged {
+        offer.valid_until += 3600;
+    }
+    offer
+}
+
+/// Every part of a request: the first piece that arrived, and the rest of the stream.
+async fn all_parts(first: Buffer, request: &mut Streaming<Buffer>, accepted: &[i32]) -> Vec<Part> {
+    let mut parser = Parser::new(ParseOptions::accepting(accepted.iter().copied()));
+    let mut parts = parser.push(first).unwrap();
+    while let Some(Ok(buffer)) = request.message().await.transpose() {
+        parts.extend(parser.push(buffer).unwrap());
+    }
+    parts
 }
 
 fn instance(ip: &str, port: i32) -> Instance {
@@ -137,15 +216,16 @@ impl tonic::server::StreamingService<Buffer> for Method {
                         key: key.into(),
                         value: Some(Amount { n: n.into() }),
                     };
-                    Peer {
-                        public_key: PEER_ID.into(),
+                    let mut peer = Peer {
+                        signature_scheme: Some(service_library::receipt::receipt_scheme()),
                         rates: vec![
                             rate("statement_query_mu", "100"),
                             rate("statement_row_mu", "1"),
                         ],
                         ..Default::default()
-                    }
-                    .encode_to_vec()
+                    };
+                    service_library::peer::sign_with_seed(&mut peer, unix_now(), &SEED).unwrap();
+                    peer.encode_to_vec()
                 }
                 "/celaut.Gateway/GetBalanceStatement" => {
                     let mut parser = Parser::new(ParseOptions::accepting([1]));
@@ -164,7 +244,8 @@ impl tonic::server::StreamingService<Buffer> for Method {
                     let account = account_ref(&request.token);
                     let row = BalanceMovement {
                         seq: 1,
-                        ts: now - 10,
+                        // The same date at every read: the hash of a row covers it.
+                        ts: *ROW_TS.get_or_init(|| now - 10),
                         amount: mu(42),
                         balance_after: mu(42),
                         kind: "credit".into(),
@@ -191,7 +272,19 @@ impl tonic::server::StreamingService<Buffer> for Method {
                     sign_with_seed(&mut statement, &SEED).unwrap();
                     statement.encode_to_vec()
                 }
+                "/celaut.Gateway/GetServiceEstimatedCost" => {
+                    node_offer(counts.offers).encode_to_vec()
+                }
                 "/celaut.Gateway/StartService" => {
+                    let parts = all_parts(first.unwrap().unwrap(), &mut request, &[3, 4]).await;
+                    let configuration = parts.iter().find(|p| p.index == 3).map(|p| {
+                        celaut_proto::celaut::Configuration::decode(p.data.as_slice()).unwrap()
+                    });
+                    counts
+                        .offers_seen
+                        .lock()
+                        .unwrap()
+                        .push(configuration.and_then(|c| c.offer));
                     let n = counts.started.fetch_add(1, Ordering::SeqCst);
                     ServiceInstance {
                         token: format!("token-{n}"),
@@ -283,9 +376,16 @@ where
 
 /// A node, and a directory with its `__config__` and the pool file.
 async fn node() -> (Arc<Counts>, PathBuf) {
+    node_with(Offers::Valid).await
+}
+
+async fn node_with(offers: Offers) -> (Arc<Counts>, PathBuf) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let counts = Arc::new(Counts::default());
+    let counts = Arc::new(Counts {
+        offers,
+        ..Default::default()
+    });
     tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(Server(counts.clone()))
@@ -332,6 +432,140 @@ async fn celaut(dir: &Path, args: &[&str]) -> (i32, Value) {
 }
 
 const SERVICE: &str = "abababababababababababababababababababababababababababababababab";
+
+const DEP: [&str; 4] = ["--service", SERVICE, "--root", "/nonexistent"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cost_gives_the_signed_offer_and_checks_it() {
+    let (_, dir) = node().await;
+    let (code, cost) = celaut(&dir, &[&["cost"][..], &DEP].concat()).await;
+    assert_eq!(code, 0, "{cost}");
+    assert_eq!(cost["cost_mu"], "10");
+    let offer = &cost["offer"];
+    assert_eq!(offer["promise"], true);
+    assert_eq!(offer["signed"], true);
+    assert_eq!(offer["usable"], true);
+    assert_eq!(offer["fault"], Value::Null);
+    assert_eq!(offer["launch_scarcity_ppm"]["cpu"], 250_000);
+    // The hex is the EstimatedCost, with the signature that verifies for the node.
+    let bytes = hex::decode(offer["hex"].as_str().unwrap()).unwrap();
+    let kept = EstimatedCost::decode(bytes.as_slice()).unwrap();
+    assert!(service_library::offer::signature_verifies(&kept, PEER_ID));
+    assert_eq!(kept.valid_until, offer["valid_until"].as_i64().unwrap());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cost_says_that_an_offer_is_not_usable_and_why() {
+    for (mode, fault) in [
+        (Offers::NoPromise, "no promise"),
+        (Offers::Expired, "past its valid_until"),
+        (Offers::Forged, "not signed"),
+    ] {
+        let (_, dir) = node_with(mode).await;
+        let (code, cost) = celaut(&dir, &[&["cost"][..], &DEP].concat()).await;
+        assert_eq!(code, 0, "{cost}");
+        assert_eq!(cost["offer"]["usable"], false);
+        let text = cost["offer"]["fault"].as_str().unwrap();
+        assert!(text.contains(fault), "{text}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn acquire_with_use_offer_sends_the_signed_offer_in_the_configuration() {
+    let (counts, dir) = node().await;
+    let (code, got) = celaut(&dir, &[&["acquire", "--use-offer"][..], &DEP].concat()).await;
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["offer"]["sent"], true);
+    let seen = counts.offers_seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let offer = seen[0]
+        .clone()
+        .expect("the node got the offer in Configuration.offer");
+    assert!(service_library::offer::signature_verifies(&offer, PEER_ID));
+    assert!(offer.valid_until > unix_now());
+    // The pool keeps one instance for the configuration: the offer does not split it.
+    let (_, release) = celaut(&dir, &["release", &got["lease"].to_string()]).await;
+    let _ = release;
+    let (_, again) = celaut(&dir, &[&["acquire"][..], &DEP].concat()).await;
+    assert_eq!(again["new"], false);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn acquire_with_a_kept_offer_sends_it_and_refuses_one_that_the_node_would_ignore() {
+    let (counts, dir) = node().await;
+    let kept = node_offer(Offers::Valid);
+    let hex_offer = hex::encode(kept.encode_to_vec());
+    let (code, got) = celaut(
+        &dir,
+        &[&["acquire", "--offer", &hex_offer][..], &DEP].concat(),
+    )
+    .await;
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["offer"]["sent"], true);
+    assert_eq!(counts.offers_seen.lock().unwrap()[0].as_ref(), Some(&kept));
+
+    // From a file.
+    let path = dir.join("offer.bin");
+    std::fs::write(&path, kept.encode_to_vec()).unwrap();
+    let at_file = format!("@{}", path.display());
+    let (code, got) = celaut(
+        &dir,
+        &[&["acquire", "--new", "--offer", &at_file][..], &DEP].concat(),
+    )
+    .await;
+    assert_eq!(code, 0, "{got}");
+
+    // An expired offer, and one with a moved time, are errors and start nothing.
+    let started = counts.started.load(Ordering::SeqCst);
+    for mode in [Offers::Expired, Offers::Forged, Offers::NoPromise] {
+        let bad = hex::encode(node_offer(mode).encode_to_vec());
+        let (code, error) = celaut(
+            &dir,
+            &[&["acquire", "--new", "--offer", &bad][..], &DEP].concat(),
+        )
+        .await;
+        assert_eq!(code, 1, "{error}");
+        assert!(error["error"]
+            .as_str()
+            .unwrap()
+            .contains("would be ignored by the node"));
+    }
+    assert_eq!(counts.started.load(Ordering::SeqCst), started);
+    let (code, _) = celaut(
+        &dir,
+        &[&["acquire", "--new", "--offer", "zz"][..], &DEP].concat(),
+    )
+    .await;
+    assert_eq!(code, 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_makes_no_promise_starts_without_an_offer_with_use_offer() {
+    let (counts, dir) = node_with(Offers::NoPromise).await;
+    let (code, got) = celaut(&dir, &[&["acquire", "--use-offer"][..], &DEP].concat()).await;
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["offer"]["sent"], false);
+    assert_eq!(counts.offers_seen.lock().unwrap()[0], None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offer_signed_by_another_node_than_the_pinned_one_is_refused() {
+    let (_, dir) = node().await;
+    let other = "ab".repeat(32);
+    let (code, error) = celaut(
+        &dir,
+        &[&["--peer-id", &other, "acquire", "--use-offer"][..], &DEP].concat(),
+    )
+    .await;
+    assert_eq!(code, 1, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("not signed"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_instance_is_reused_between_commands_and_stopped_at_the_end() {
